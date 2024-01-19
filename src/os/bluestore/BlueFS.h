@@ -120,6 +120,8 @@ struct bluefs_shared_alloc_context_t {
 class BlueFS {
 public:
   CephContext* cct;
+
+  // 文件系统支持不同种类的块设备
   static constexpr unsigned MAX_BDEV = 5;
   static constexpr unsigned BDEV_WAL = 0;
   static constexpr unsigned BDEV_DB = 1;
@@ -129,21 +131,23 @@ public:
 
   enum {
     WRITER_UNKNOWN,
-    WRITER_WAL,
-    WRITER_SST,
+    WRITER_WAL,		// RocksDB 的 log 文件
+    WRITER_SST,		// RocksDB 的 sst 文件
   };
 
+  // 文件
   struct File : public RefCountedObject {
     MEMPOOL_CLASS_HELPERS();
 
-    bluefs_fnode_t fnode;
-    int refs;
-    uint64_t dirty_seq;
+    bluefs_fnode_t fnode;	// 文件 inode
+    int refs;			// 引用计数
+    uint64_t dirty_seq;		// dirty 序列号
     bool locked;
     bool deleted;
     bool is_dirty;
     boost::intrusive::list_member_hook<> dirty_item;
 
+    // 读写计数
     std::atomic_int num_readers, num_writers;
     std::atomic_int num_reading;
 
@@ -184,9 +188,11 @@ public:
 	boost::intrusive::list_member_hook<>,
 	&File::dirty_item> > dirty_file_list_t;
 
+  // 目录
   struct Dir : public RefCountedObject {
     MEMPOOL_CLASS_HELPERS();
 
+    // 目录包含的文件
     mempool::bluefs::map<std::string, FileRef, std::less<>> file_map;
 
   private:
@@ -350,8 +356,8 @@ private:
   // cache
   struct {
     ceph::mutex lock = ceph::make_mutex("BlueFS::nodes.lock");
-    mempool::bluefs::map<std::string, DirRef, std::less<>> dir_map; ///< dirname -> Dir
-    mempool::bluefs::unordered_map<uint64_t, FileRef> file_map;     ///< ino -> File
+    mempool::bluefs::map<std::string, DirRef, std::less<>> dir_map; // 所有的目录
+    mempool::bluefs::unordered_map<uint64_t, FileRef> file_map;     // 所有的文件
   } nodes;
 
   bluefs_super_t super;        ///< latest superblock (as last written)
@@ -375,7 +381,7 @@ private:
     // eras in a way similar to dirty_files. Hints:
     // 1) we have actually only 2 eras: log_seq and log_seq+1
     // 2) we usually not remove extents from files. And when we do, we force log-syncing.
-  } dirty;
+  } dirty;	// 所有的脏文件
 
   ceph::condition_variable log_cond;                             ///< used for state control between log flush / log compaction
   std::atomic<bool> log_is_compacting{false};                    ///< signals that bluefs log is already ongoing compaction

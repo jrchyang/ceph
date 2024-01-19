@@ -12,9 +12,9 @@
 
 class bluefs_extent_t {
 public:
-  uint64_t offset = 0;
-  uint32_t length = 0;
-  uint8_t bdev;
+  uint64_t offset = 0;		// 物理磁盘偏移
+  uint32_t length = 0;		// 长度
+  uint8_t bdev;			// 所属磁盘
 
   bluefs_extent_t(uint8_t b = 0, uint64_t o = 0, uint32_t l = 0)
     : offset(o), length(l), bdev(b) {}
@@ -59,17 +59,17 @@ WRITE_CLASS_DENC(bluefs_fnode_delta_t)
 std::ostream& operator<<(std::ostream& out, const bluefs_fnode_delta_t& delta);
 
 struct bluefs_fnode_t {
-  uint64_t ino;
-  uint64_t size;
-  utime_t mtime;
-  uint8_t __unused__ = 0; // was prefer_bdev
-  mempool::bluefs::vector<bluefs_extent_t> extents;
+  uint64_t ino;			// inode 编号
+  uint64_t size;		// 文件大小
+  utime_t mtime;		// 文件修改时间
+  uint8_t __unused__ = 0;	// 之前为有限使用哪个 block device
+  mempool::bluefs::vector<bluefs_extent_t> extents;	// 文件对应的磁盘空间数组
 
   // precalculated logical offsets for extents vector entries
   // allows fast lookup for extent index by the offset value via upper_bound()
   mempool::bluefs::vector<uint64_t> extents_index;
 
-  uint64_t allocated;
+  uint64_t allocated;		// 文件实际占用的空间
   uint64_t allocated_commited;
 
   bluefs_fnode_t() : ino(0), size(0), allocated(0), allocated_commited(0) {}
@@ -209,12 +209,12 @@ struct bluefs_layout_t {
 WRITE_CLASS_ENCODER(bluefs_layout_t)
 
 struct bluefs_super_t {
-  uuid_d uuid;      ///< unique to this bluefs instance
-  uuid_d osd_uuid;  ///< matches the osd that owns us
-  uint64_t version;
-  uint32_t block_size;
+  uuid_d uuid;			// 唯一 uuid
+  uuid_d osd_uuid;		// 对应 OSD 的 uuid
+  uint64_t version;		// 版本
+  uint32_t block_size;		// 块大小
 
-  bluefs_fnode_t log_fnode;
+  bluefs_fnode_t log_fnode;	// 记录文件系统日志的文件
 
   std::optional<bluefs_layout_t> memorized_layout;
 
@@ -240,14 +240,24 @@ struct bluefs_transaction_t {
   typedef enum {
     OP_NONE = 0,
     OP_INIT,        ///< initial (empty) file system marker
+
+    // 给文件分配/释放空间
     OP_ALLOC_ADD,   ///< OBSOLETE: add extent to available block storage (extent)
     OP_ALLOC_RM,    ///< OBSOLETE: remove extent from available block storage (extent)
+
+    //  创建/删除目录项
     OP_DIR_LINK,    ///< (re)set a dir entry (dirname, filename, ino)
     OP_DIR_UNLINK,  ///< remove a dir entry (dirname, filename)
+
+    // 创建/删除目录
     OP_DIR_CREATE,  ///< create a dir (dirname)
     OP_DIR_REMOVE,  ///< remove a dir (dirname)
+
+    // 文件更新
     OP_FILE_UPDATE, ///< set/update file metadata (file)
     OP_FILE_REMOVE, ///< remove file (ino)
+
+    // bluefs 日志文件的 compaction 操作
     OP_JUMP,        ///< jump the seq # and offset
     OP_JUMP_SEQ,    ///< jump the seq #
     OP_FILE_UPDATE_INC, ///< incremental update file metadata (file)
