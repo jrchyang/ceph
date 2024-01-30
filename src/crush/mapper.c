@@ -868,11 +868,11 @@ void crush_init_workspace(const struct crush_map *m, void *v) {
  * crush_do_rule - calculate a mapping with the given input and rule
  * @map: the crush_map
  * @ruleno: the rule id
- * @x: hash input
- * @result: pointer to result vector
- * @result_max: maximum result size
- * @weight: weight vector (for map leaves)
- * @weight_max: size of weight vector
+ * @x: hash input : 一般是 pg id
+ * @result: pointer to result vector : osd 列表
+ * @result_max: maximum result size : osd 列表数量
+ * @weight: weight vector (for map leaves) : 所有 osd 的权重，通过它来判断 osd 是否 out
+ * @weight_max: size of weight vector : 所有 osd 的数量
  * @cwin: Pointer to at least map->working_size bytes of memory or NULL.
  */
 int crush_do_rule(const struct crush_map *map,

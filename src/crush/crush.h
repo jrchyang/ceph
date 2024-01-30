@@ -41,9 +41,9 @@
  * to generate the set of output devices.
  */
 struct crush_rule_step {
-	__u32 op;
-	__s32 arg1;
-	__s32 arg2;
+	__u32 op;	// step 操作步的操作码
+	__s32 arg1;	// 如果是 take，参数就是选择的 bucket 的 id 号；如果是 select，就是选择的数量
+	__s32 arg2;	// 如果是 select，是选择的类型
 };
 
 /** @ingroup API
@@ -76,12 +76,12 @@ enum crush_opcodes {
 #define CRUSH_CHOOSE_N_MINUS(x)   (-(x))
 
 struct crush_rule {
-	__u32 len;
+	__u32 len;				// steps 的数组的长度
 	__u8 __unused_was_rule_mask_ruleset;
 	__u8 type;
 	__u8 deprecated_min_size;
 	__u8 deprecated_max_size;
-	struct crush_rule_step steps[0];
+	struct crush_rule_step steps[0];	// 操作步
 };
 
 #define crush_rule_size(len) (sizeof(struct crush_rule) + \
@@ -220,12 +220,17 @@ struct crush_bucket {
 	__s32 id;        /*!< bucket identifier, < 0 and unique within a crush_map */
 	__u16 type;      /*!< > 0 bucket type, defined by the caller */
 	__u8 alg;        /*!< the item selection ::crush_algorithm */
-        /*! @cond INTERNAL */
+	/*! @cond INTERNAL */
 	__u8 hash;       /* which hash function to use, CRUSH_HASH_* */
 	/*! @endcond */
 	__u32 weight;    /*!< 16.16 fixed point cumulated children weight */
 	__u32 size;      /*!< size of the __items__ array */
-        __s32 *items;    /*!< array of children: < 0 are buckets, >= 0 items */
+	/**
+	 * 子 bucket 在 crush_bucket 结构 buckets 数组的下标，这里特别要注意的是，
+	 * 其子 item 的 crush_bucket 结构体都统一保存在 crush_map 结构中的
+	 * buckets 数组中，这里只保存其在数组中的下标
+	 */
+	__s32 *items;    /*!< array of children: < 0 are buckets, >= 0 items */
 };
 
 /** @ingroup API
