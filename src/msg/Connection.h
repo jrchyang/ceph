@@ -41,22 +41,23 @@ class Interceptor;
 #endif
 
 struct Connection : public RefCountedObjectSafe {
-  mutable ceph::mutex lock = ceph::make_mutex("Connection::lock");
+  mutable ceph::mutex lock = ceph::make_mutex("Connection::lock");	// 锁保护 Connection 的所有字段
   Messenger *msgr;
-  RefCountedPtr priv;
-  int peer_type = -1;
+  RefCountedPtr priv;	// 链接的私有数据
+  int peer_type = -1;	// 链接的 peer 类型
   int64_t peer_id = -1;  // [msgr2 only] the 0 of osd.0, 4567 or client.4567
-  safe_item_history<entity_addrvec_t> peer_addrs;
+  safe_item_history<entity_addrvec_t> peer_addrs;	// peer 的地址
+  // 最后一次发送 keeplive 的时间和最后一次接收 keepalive 的 ack 时间
   utime_t last_keepalive, last_keepalive_ack;
   bool anon = false;  ///< anonymous outgoing connection
 private:
-  uint64_t features = 0;
+  uint64_t features = 0;	// 一些 feature 的标志位
 public:
   bool is_loopback = false;
   bool failed = false; // true if we are a lossy connection that has failed.
 
-  int rx_buffers_version = 0;
-  std::map<ceph_tid_t,std::pair<ceph::buffer::list, int>> rx_buffers;
+  int rx_buffers_version = 0;	// 接收缓冲区的版本
+  std::map<ceph_tid_t,std::pair<ceph::buffer::list, int>> rx_buffers;	// 接收缓冲区
 
   // authentication state
   // FIXME make these private after ms_handle_authorizer is removed

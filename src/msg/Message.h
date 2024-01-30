@@ -253,28 +253,31 @@ public:
 #endif // WITH_SEASTAR
 
 protected:
+  // 消息头 和 消息尾
   ceph_msg_header  header;      // headerelope
   ceph_msg_footer  footer;
-  ceph::buffer::list       payload;  // "front" unaligned blob
-  ceph::buffer::list       middle;   // "middle" unaligned blob
-  ceph::buffer::list       data;     // data payload (page-alignment will be preserved where possible)
+  // 用户数据
+  ceph::buffer::list       payload;  // "front" unaligned blob 一般保存 ceph 操作相关的元数据
+  ceph::buffer::list       middle;   // "middle" unaligned blob 尚未使用
+  ceph::buffer::list       data;     // data payload (page-alignment will be preserved where possible) 一般为读写数据
 
+  // 消息时间戳
   /* recv_stamp is set when the Messenger starts reading the
    * Message off the wire */
-  utime_t recv_stamp;
+  utime_t recv_stamp;		// 开始接收数据的时间
   /* dispatch_stamp is set when the Messenger starts calling dispatch() on
    * its endpoints */
-  utime_t dispatch_stamp;
+  utime_t dispatch_stamp;	// 派发时间
   /* throttle_stamp is the point at which we got throttle */
-  utime_t throttle_stamp;
+  utime_t throttle_stamp;	// 获取 throttle 的 slot 的时间
   /* time at which message was fully read */
-  utime_t recv_complete_stamp;
+  utime_t recv_complete_stamp;	// 接收完成的时间
 
-  ConnectionRef connection;
+  ConnectionRef connection;	// 网络连接类
 
-  uint32_t magic = 0;
+  uint32_t magic = 0;		// 消息的魔法数
 
-  boost::intrusive::list_member_hook<> dispatch_q;
+  boost::intrusive::list_member_hook<> dispatch_q; // boost::intrusive list 链接件
 
 public:
   // zipkin tracing
