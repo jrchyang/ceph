@@ -64,6 +64,7 @@
 
 /*
  * ceph_file_layout - describe data layout for a file/inode
+ * 文件 -> 对象的映射
  */
 struct ceph_file_layout {
 	/* file -> object mapping */

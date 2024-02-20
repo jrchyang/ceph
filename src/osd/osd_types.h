@@ -4121,11 +4121,11 @@ std::ostream& operator<<(std::ostream& out, const ObjectCleanRegions& ocr);
 
 
 struct OSDOp {
-  ceph_osd_op op;
-  sobject_t soid;
+  ceph_osd_op op;			// 各种操作码和操作参数
+  sobject_t soid;			// 操作对象
 
-  ceph::buffer::list indata, outdata;
-  errorcode32_t rval = 0;
+  ceph::buffer::list indata, outdata;	// 输入和输出 bufferlist
+  errorcode32_t rval = 0;		// 操作结果
 
   OSDOp() {
     // FIPS zeroization audit 20191115: this memset clean for security
@@ -5440,14 +5440,14 @@ class ObjectExtent {
    * in buffer_extents matching the length, and set oloc.pool to 0.
    */
  public:
-  object_t    oid;       // object id
-  uint64_t    objectno;
-  uint64_t    offset;    // in object
-  uint64_t    length;    // in object
-  uint64_t    truncate_size;	// in object
+  object_t    oid;		// object id
+  uint64_t    objectno;		// 分片序号
+  uint64_t    offset;		// in object 对象内的偏移
+  uint64_t    length;		// in object 对象内的长度
+  uint64_t    truncate_size;	// in object 对象 truncate 的操作的 size
 
-  object_locator_t oloc;   // object locator (pool etc)
-
+  object_locator_t oloc;	// object locator (pool etc) 对象位置信息
+  // extents 在 buffer 中的偏移和长度，有可能有多个 extents
   std::vector<std::pair<uint64_t,uint64_t> >  buffer_extents;  // off -> len.  extents in buffer being mapped (may be fragmented bc of striping!)
   
   ObjectExtent() : objectno(0), offset(0), length(0), truncate_size(0) {}

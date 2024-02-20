@@ -3324,6 +3324,7 @@ void BlueStore::ExtentMap::init_shards(bool loaded, bool dirty)
   }
 }
 
+// 确保指定范围内的 extent map 被加载，extent map 指向数据实际位置
 void BlueStore::ExtentMap::fault_range(
   KeyValueDB *db,
   uint32_t offset,
@@ -3519,6 +3520,8 @@ int BlueStore::ExtentMap::compress_extent_map(
   return removed;
 }
 
+// 目标写区域与 extent_map lextent 所有重叠区域分离到 old_extents
+// 原 lextent 收尾也相应调整是否存在可复用 blob 否则创建新的 blob
 void BlueStore::ExtentMap::punch_hole(
   CollectionRef &c, 
   uint64_t offset,
@@ -10802,6 +10805,9 @@ int BlueStore::read(
       goto out;
     }
 
+    /**
+     * 调整读大小，如果传入的 起始位置 和 偏移 都为 0，则读取整个对象
+     */
     if (offset == length && offset == 0)
       length = o->onode.size;
 
@@ -10857,11 +10863,14 @@ void BlueStore::_read_cache(
     }
     BlobRef& bptr = lp->blob;
     unsigned l_off = pos - lp->logical_offset;
+    // 本次读取在 blob 内的偏移
     unsigned b_off = l_off + lp->blob_offset;
+    // blob 的长度 和 剩余长度 去小
     unsigned b_len = std::min(left, lp->length - l_off);
 
     ready_regions_t cache_res;
     interval_set<uint32_t> cache_interval;
+    // 将缓存中的数据读到 cache_res 中
     bptr->shared_blob->bc.read(
       bptr->shared_blob->get_cache(), b_off, b_len, cache_res, cache_interval,
       read_cache_policy);
@@ -10870,6 +10879,7 @@ void BlueStore::_read_cache(
              << " cache has 0x" << cache_interval
              << std::dec << dendl;
 
+    // 将数据从 cache_res 整理到 ready_regions 中
     auto pc = cache_res.begin();
     uint64_t chunk_size = bptr->get_blob().get_chunk_size(block_size);
     while (b_len > 0) {
@@ -11109,6 +11119,7 @@ int BlueStore::_do_read(
            << o->onode.size << ")" << dendl;
   bl.clear();
 
+  // 起始位置超过对象大小时直接返回，此时返回值为 0
   if (offset >= o->onode.size) {
     return r;
   }
@@ -11126,12 +11137,15 @@ int BlueStore::_do_read(
     buffered = true;
   }
 
+  // 读取范围超过对象大小时调整 size
   if (offset + length > o->onode.size) {
     length = o->onode.size - offset;
   }
 
   auto start = mono_clock::now();
+  // 加载 offset & length 范围内的 shard 的 extent
   o->extent_map.fault_range(db, offset, length);
+  // 记录加载元数据耗时
   log_latency(__func__,
     l_bluestore_read_onode_meta_lat,
     mono_clock::now() - start,
@@ -11146,6 +11160,8 @@ int BlueStore::_do_read(
   }
 
   // build blob-wise list to of stuff read (that isn't cached)
+  // 将 cache 中存在的数据读到 ready_regions 中
+  // 将 cache 中不存在的数据设置到 blobs2read 中
   ready_regions_t ready_regions;
   blobs2read_t blobs2read;
   _read_cache(o, offset, length, read_cache_policy, ready_regions, blobs2read);
@@ -11165,8 +11181,10 @@ int BlueStore::_do_read(
   int64_t num_ios = blobs2read.size();
   if (ioc.has_pending_aios()) {
     num_ios = ioc.get_num_ios();
+    // 向磁盘提交读请求
     bdev->aio_submit(&ioc);
     dout(20) << __func__ << " waiting for aio" << dendl;
+    // 等待 io 完成
     ioc.aio_wait();
     r = ioc.get_return_value();
     if (r < 0) {
@@ -11182,6 +11200,7 @@ int BlueStore::_do_read(
   );
 
   bool csum_error = false;
+  // 将结果整理到 bl 中
   r = _generate_read_result_bl(o, offset, length, ready_regions,
                               compressed_blob_bls, blobs2read,
                               buffered && !ioc.skip_cache(),
@@ -12692,24 +12711,40 @@ void BlueStore::_txc_finish_io(TransContext *txc)
    * we need to preserve the order of kv transactions,
    * even though aio will complete in any order.
    */
-
+  // 获取 txc 所属的 OpSequencer，并且加锁，保证互斥访问 osr
   OpSequencer *osr = txc->osr.get();
   std::lock_guard l(osr->qlock);
+  // 设置状态机的 state 为 STATE_IO_DONE
   txc->set_state(TransContext::STATE_IO_DONE);
+  // 清除 txc 正在运行的 aio
   txc->ioc.release_running_aios();
+  // 定位当前 txc 在 osr 的位置
   OpSequencer::q_list_t::iterator p = osr->q.iterator_to(*txc);
   while (p != osr->q.begin()) {
     --p;
+    /**
+     * 如果前面还有未完成的 IO 的 txc，那么需要停止当前 txc 操作，等待前面 txc 完成 IO
+     * 目的是：确保之前 txc 的 IO 都完成
+     */
     if (p->get_state() < TransContext::STATE_IO_DONE) {
       dout(20) << __func__ << " " << txc << " blocked by " << &*p << " "
 	       << p->get_state_name() << dendl;
       return;
     }
+    /**
+     * 前面的 txc 已经进入大于等于 STATE_KV_QUEUE 的状态了，那么递增 p 并退出循环
+     * 目的是：找到状态为 STATE_IO_DONE 的且在 osr 中排序最靠前的 txc
+     */
     if (p->get_state() > TransContext::STATE_IO_DONE) {
       ++p;
       break;
     }
   }
+
+  /**
+   * 依次处理状态为 STATE_IO_DONE 的 txc
+   * 将 txc 放入 kv_sync_thread 的 kv_queue、kv_queue_unsubmitted 队列
+   */
   do {
     _txc_state_proc(&*p++);
   } while (p != osr->q.end() &&
@@ -13880,6 +13915,7 @@ void BlueStore::_deferred_submit_unlock(OpSequencer *osr)
   deferred_queue_size -= b->seq_bytes.size();
   ceph_assert(deferred_queue_size >= 0);
 
+  // 切换指针，保证每次操作完成后才会进行下一次提交
   osr->deferred_running = osr->deferred_pending;
   osr->deferred_pending = nullptr;
 
@@ -13900,6 +13936,7 @@ void BlueStore::_deferred_submit_unlock(OpSequencer *osr)
 	if (!g_conf()->bluestore_debug_omit_block_device_write) {
 	  logger->inc(l_bluestore_submitted_deferred_writes);
 	  logger->inc(l_bluestore_submitted_deferred_write_bytes, bl.length());
+	  // 准备所有 txc 的写 buffer
 	  int r = bdev->aio_write(start, bl, &b->ioc, false);
 	  ceph_assert(r == 0);
 	}
@@ -13922,6 +13959,7 @@ void BlueStore::_deferred_submit_unlock(OpSequencer *osr)
     ++i;
   }
 
+  // 一次性提交所有 txc
   bdev->aio_submit(&b->ioc);
 }
 
@@ -14124,6 +14162,9 @@ int BlueStore::queue_transactions(
   ThreadPool::TPHandle *handle)
 {
   FUNCTRACE(cct);
+
+  // 获取 applied / commit / sync 三个阶段的回调函数
+  // 三个回调函数封装在事务中由调用者提供
   list<Context *> on_applied, on_commit, on_applied_sync;
   ObjectStore::Transaction::collect_contexts(
     tls, &on_applied, &on_commit, &on_applied_sync);
@@ -14145,15 +14186,21 @@ int BlueStore::queue_transactions(
   }
 
   // prepare
+  // 创建 KVDB 的事务同时获取 PG 对应的 OpSequencer(每个 PG 有一个 OpSequencer) 用来保证 PG 上的 IO 串行执行
   TransContext *txc = _txc_create(static_cast<Collection*>(ch.get()), osr,
 				  &on_commit, op);
 
+  // 遍历收集到的 list<Context *> 根据事务对应的操作码分别进行处理
   for (vector<Transaction>::iterator p = tls.begin(); p != tls.end(); ++p) {
     txc->bytes += (*p).get_num_bytes();
     _txc_add_transaction(txc, &(*p));
   }
+  // 计算事务开销
   _txc_calc_cost(txc);
 
+  // 写 ONode 数据（ONode 是常驻内存的数据结构，主要用于管理对象元数据）
+  // 持久化时，ONode 数据将被写入到 RocksDB 中
+  // 更新元数据
   _txc_write_nodes(txc, txc->t);
 
   // journal deferred items
@@ -14166,6 +14213,7 @@ int BlueStore::queue_transactions(
     txc->t->set(PREFIX_DEFERRED, key, bl);
   }
 
+  // 状态机处理
   _txc_finalize_kv(txc, txc->t);
 
 #ifdef WITH_BLKIN
@@ -14207,6 +14255,7 @@ int BlueStore::queue_transactions(
   logger->inc(l_bluestore_txc);
 
   // execute (start)
+  // 状态机处理
   _txc_state_proc(txc);
 
   if (bdev->is_smr()) {
@@ -15430,6 +15479,7 @@ void BlueStore::_do_write_big(
 
     // Zero detection -- big block
     if (!cct->_conf->bluestore_zero_block_detection || !t.is_zero()) {
+      // 写操作存入 wctx
       wctx->write(offset, b, l, b_off, t, b_off, l, false, new_blob);
 
       dout(20) << __func__ << " schedule write big: 0x"
@@ -16220,7 +16270,9 @@ int BlueStore::_write(TransContext *txc,
     r = -E2BIG;
   } else {
     _assign_nid(txc, o);
+    // 写数据
     r = _do_write(txc, c, o, offset, length, bl, fadvise_flags);
+    // 更新元数据
     txc->write_onode(o);
   }
   dout(10) << __func__ << " " << c->cid << " " << o->oid
@@ -17604,6 +17656,7 @@ int BlueStore::flush_cache(ostream *os)
   return 0;
 }
 
+// 是否需要补零处理
 void BlueStore::_apply_padding(uint64_t head_pad,
 			       uint64_t tail_pad,
 			       bufferlist& padded)

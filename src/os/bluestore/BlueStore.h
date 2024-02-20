@@ -587,6 +587,7 @@ public:
 //#define CACHE_BLOB_BL  // not sure if this is a win yet or not... :/
 
   /// in-memory blob metadata and associated cached buffers (if any)
+  /// 包含一个 bluestore_blob_t、引用计数、共享 blob 等信息
   struct Blob {
     MEMPOOL_CLASS_HELPERS();
 
@@ -761,13 +762,22 @@ public:
 
   /// a logical extent, pointing to (some portion of) a blob
   typedef boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true> > ExtentBase; //making an alias to avoid build warnings
+  // 一段对象的逻辑空间 (lextent)
   struct Extent : public ExtentBase {
     MEMPOOL_CLASS_HELPERS();
 
-    uint32_t logical_offset = 0;      ///< logical offset
-    uint32_t blob_offset = 0;         ///< blob offset
-    uint32_t length = 0;              ///< length
-    BlobRef  blob;                    ///< the blob with our data
+    /**
+     * 当 logic_offset 不是磁盘块大小自然对齐时，将对应逻辑段内的数据通过 blob 映射到磁盘
+     * 物理段（或者集合中）会产生物理段内的偏移，这个偏移称为 blob_offset；反之如果
+     * logical_offset 天然块大小对齐，则 blob_offset 为 0
+     *      | ------------ | --------------- | ----- |
+     *      |  blob offset |     length      |
+     * blob start   logical offset               blob end
+     */
+    uint32_t logical_offset = 0;      ///< logical offset 该 extent 在对象内逻辑偏移，不需要块对齐
+    uint32_t blob_offset = 0;         ///< blob offset 当 logical_offset 是块对齐时始终为零；不对齐时，将逻辑段内的数据通过 blob 映射到磁盘物理段会产生物理段内的偏移称为 blob_offset
+    uint32_t length = 0;              ///< length 逻辑段长度，不需要块对齐
+    BlobRef  blob;                    ///< the blob with our data 负责将逻辑段内的数据映射至磁盘
 
     /// ctor for lookup only
     explicit Extent(uint32_t lo) : ExtentBase(), logical_offset(lo) { }
@@ -823,8 +833,8 @@ public:
       return blob_start() < o || blob_end() > o + l;
     }
   };
+  // 同一对象下所有 extent 组成 extent map
   typedef boost::intrusive::set<Extent> extent_map_t;
-
 
   friend std::ostream& operator<<(std::ostream& out, const Extent& e);
 
@@ -855,14 +865,24 @@ public:
   /// a sharded extent map, mapping offsets to lextents to blobs
   struct ExtentMap {
     Onode *onode;
+    // 逻辑段集合
     extent_map_t extent_map;        ///< map of Extents to Blobs
+    // 对象内所有跨越两个分片的 blob 集合
     blob_map_t spanning_blob_map;   ///< blobs that span shards
     typedef boost::intrusive_ptr<Onode> OnodeRef;
 
     struct Shard {
       bluestore_onode_t::shard_info *shard_info = nullptr;
       unsigned extents = 0;  ///< count extents in this shard
+      /**
+       * 对象上下文从 kvDB 加载时，我们并不需要同步加载完整的 extent map，
+       * 只有当对应范围内的 extent 被访问时，才从 kvDB 加载包含该
+       * extent 的分片。本标志位指示对应的分片已经从 kvDB 中加载
+       */
       bool loaded = false;   ///< true if shard is loaded
+      /**
+       * 指示对应分片中的 extent 被修改过，后续需要对本分片重新编码、存盘
+       */
       bool dirty = false;    ///< true if shard is dirty and needs reencoding
     };
 
@@ -1170,13 +1190,14 @@ public:
   struct OnodeSpace;
   struct OnodeCacheShard;
   /// an in-memory object
+  /// 对象在内存中的数据结构
   struct Onode {
     MEMPOOL_CLASS_HELPERS();
 
     std::atomic_int nref = 0;      ///< reference count
     std::atomic_int pin_nref = 0;  ///< reference count replica to track pinning
-    Collection *c;
-    ghobject_t oid;
+    Collection *c;		   // onode 对应的 pg
+    ghobject_t oid;		   // object 信息
 
     /// key under PREFIX_OBJ where we are stored
     mempool::bluestore_cache_meta::string key;
@@ -1188,6 +1209,18 @@ public:
     bool cached;              ///< Onode is logically in the cache
                               /// (it can be pinned and hence physically out
                               /// of it at the moment though)
+
+    /**
+     * 有序的 extent 逻辑空间集合，持久化在 RocksDB。lextent -> blob
+     *
+     * 由于支持稀疏写，所以 extent map 中的 extent 可以是不连续的，即存在空洞。
+     * 也即前一个 extent 的结束地址小于后一个 extent 的起始地址
+     *
+     * 如果单个对象内的 extent 过多（小块随机写多、硬盘碎片化严重）
+     * 那么 extent_map 会很大，严重影响 RocksDB 的访问效率
+     * 所以需要对 extent_map 分片即 shard_info ，同时也会合并相邻的小段
+     * 好处可以按需加载，减少内存占用量等
+     */
     ExtentMap extent_map;
 
     // track txc's that have not been committed to kv store (and whose
@@ -1456,6 +1489,7 @@ private:
     }
   };
 
+// 存储每个对象的映射信息
   struct OnodeSpace {
     OnodeCacheShard *cache;
 
@@ -1491,6 +1525,9 @@ private:
   class OpSequencer;
   using OpSequencerRef = ceph::ref_t<OpSequencer>;
 
+// 抽象语义为一组对象的集合
+// OSD 在使用时通常把一个 PG 作为一个 Collection
+// 该 PG 中的所有对象存入这个 Collection 中
   struct Collection : public CollectionImpl {
     BlueStore *store;
     OpSequencerRef osr;
@@ -1690,16 +1727,70 @@ private:
     MEMPOOL_CLASS_HELPERS();
 
     typedef enum {
+      /**
+       * 从 state_prepare 开始已经进入事务的状态机了。
+       * 这个阶段会调用 _txc_add_transaction 将 OSD 层面的事务转换为 BlueStore
+       * 层面的事务，然后检查是否还有未提交的 IO，如果有就将 state 设置为
+       * STATE_AIO_WAIT 并调用 _txc_aio_submit 提交 IO，然后退出状态机，之后 aio
+       * 完成的时候会调用回调函数 txc_aio_finish 再次进入状态机，否则就进入
+       * STATE_AIO_WAIT 状态
+       *
+       * 准备工作，生成大小写、初始化 TransContext、deferred_txn、分配磁盘空间等
+       */
       STATE_PREPARE,
+      /**
+       * 该阶段会调用 _txc_finish_io 进行 SimpleWrite 的 IO 保序等处理，然后将
+       * 状态设置为 STATE_IO_DONE 再调用 _txc_state_proc 进入下一个状态的处理
+       *
+       * 对 IO 保序，等待 AIO 的完成
+       */
       STATE_AIO_WAIT,
+      /**
+       * 完成 AIO 并进入 STATE_KV_QUEUED 阶段，会根据
+       * bluestore_sync_submit_transaction 做不同处理，该值为布尔值，默认为 false
+       * 如果为 true，设置状态为 STATE_KV_SUBMITTED 并且同步提交 kv 到 RocksDB
+       * 但是没有 sync 落盘（submit_transaction）然后 applied_kv
+       * 如果为 false，则不用做上面的操作，但是以下操作都会做
+       * 最后将事务放在 kv_queue 里，通过 kv_cond 通知 kv_sync_thread 去同步 IO和元数据
+       *
+       * 将事务放入 kv_queue，然后通知 kv_sync_thread，osr 的 IO 保序可能会 block
+       */
       STATE_IO_DONE,
+      /**
+       * 该阶段主要在 kv_sync_thread 线程中同步 IO 和元数据，并且将状态设置为
+       * STATE_KV_SUBMITTED
+       *
+       * 从 kv_sync_thread 队列中取出事务
+       */
       STATE_KV_QUEUED,     // queued for kv_sync_thread submission
+      /**
+       * 等待 kv_sync_thread 中 kv 元数据和 IO 数据的 sync 完成，然后将状态设置为
+       * STATE_KV_DONE 并且回调 finisher 线程
+       *
+       * 等待 kv 元数据和 IO 数据的 sync 完成，回调 finisher 线程
+       */
       STATE_KV_SUBMITTED,  // submitted to kv; not yet synced
+      /**
+       * 如果是 SimpleWrite ，则直接将装填设置为 STATE_FINISHING
+       * 如果是 DeferredWrite ，则将状态设置为 STATE_DEFERRED_QUEUED 并放入 deferred_queue
+       */
       STATE_KV_DONE,
+      /**
+       * 将延迟 IO 放入 deffered_queue 等待提交
+       */
       STATE_DEFERRED_QUEUED,    // in deferred_queue (pending or running)
+      /**
+       * 清理延迟 IO 在 RocksDB 上的 WAL
+       */
       STATE_DEFERRED_CLEANUP,   // remove deferred kv record
       STATE_DEFERRED_DONE,
+      /**
+       * 设置状态为 STATE_DONE 如果还有 DefferedIO 也会提交
+       */
       STATE_FINISHING,
+      /**
+       * 标识整个 IO 完成
+       */
       STATE_DONE,
     } state_t;
 
@@ -2131,6 +2222,7 @@ private:
     }
   };
 
+  // IO 保序
   typedef boost::intrusive::list<
     OpSequencer,
     boost::intrusive::member_hook<
@@ -2587,7 +2679,7 @@ private:
   private:
     void _update_cache_settings();
     void _resize_shards(bool interval_stats);
-  } mempool_thread;
+  } mempool_thread;  // 无队列，后台监控内存的使用情况，超过内存使用的限制便会做 trim
 
 #ifdef WITH_BLKIN
   ZTracer::Endpoint trace_endpoint {"0.0.0.0", 0, "BlueStore"};
@@ -3377,6 +3469,7 @@ private:
   // --------------------------------------------------------
   // write ops
 
+  // bluestore 写操作上下文
   struct WriteContext {
     bool buffered = false;          ///< buffered write
     bool compress = false;          ///< compressed write
@@ -3386,6 +3479,7 @@ private:
     old_extent_map_t old_extents;   ///< must deref these blobs
     interval_set<uint64_t> extents_to_gc; ///< extents for garbage collection
 
+    // 写条目
     struct write_item {
       uint64_t logical_offset;      ///< write logical offset
       BlobRef b;
@@ -3432,6 +3526,7 @@ private:
       target_blob_size = other.target_blob_size;
       csum_order = other.csum_order;
     }
+    // bluestore 大小写都会调用，向 writes 这个 vector 里面插入一条 write_item
     void write(
       uint64_t loffs,
       BlobRef b,

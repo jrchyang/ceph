@@ -238,11 +238,12 @@ int librados::RadosClient::connect()
 
   poolctx.start(cct->_conf.get_val<std::uint64_t>("librados_thread_count"));
 
-  // get monmap
+  // get monmap 从配置文件里检查是否有初始的 monitor 的地址信息
   err = monclient.build_initial_monmap();
   if (err < 0)
     goto out;
 
+  // 创建网络通信模块 messenger
   err = -ENOMEM;
   messenger = Messenger::create_client_messenger(cct, "radosclient");
   if (!messenger)
@@ -251,12 +252,13 @@ int librados::RadosClient::connect()
   // require OSDREPLYMUX feature.  this means we will fail to talk to
   // old servers.  this is necessary because otherwise we won't know
   // how to decompose the reply data into its constituent pieces.
+  // 设置相关 policy
   messenger->set_default_policy(Messenger::Policy::lossy_client(CEPH_FEATURE_OSDREPLYMUX));
 
   ldout(cct, 1) << "starting msgr at " << messenger->get_myaddrs() << dendl;
-
   ldout(cct, 1) << "starting objecter" << dendl;
 
+  // 创建 objecter 对象并初始化
   objecter = new (std::nothrow) Objecter(cct, messenger, &monclient, poolctx);
   if (!objecter)
     goto out;
@@ -276,6 +278,7 @@ int librados::RadosClient::connect()
   monclient.set_want_keys(
       CEPH_ENTITY_TYPE_MON | CEPH_ENTITY_TYPE_OSD | CEPH_ENTITY_TYPE_MGR);
   ldout(cct, 1) << "calling monclient init" << dendl;
+  // 初始化 monclient
   err = monclient.init();
   if (err) {
     ldout(cct, 0) << conf->name << " initialization error " << cpp_strerror(-err) << dendl;

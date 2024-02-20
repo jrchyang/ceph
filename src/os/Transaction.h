@@ -178,11 +178,12 @@ public:
   } __attribute__ ((packed)) ;
 
   struct TransactionData {
-    ceph_le64 ops;
-    ceph_le32 largest_data_len;
-    ceph_le32 largest_data_off;
-    ceph_le32 largest_data_off_in_data_bl;
-    ceph_le32 fadvise_flags;
+    ceph_le64 ops;				// 本次事务中的操作数目
+    // 以下记录了事务中的带的数据最大的操作的：
+    ceph_le32 largest_data_len;			// 最大的数据长度
+    ceph_le32 largest_data_off;			// 在对象中的偏移
+    ceph_le32 largest_data_off_in_data_bl;	// 在 data bl 中的偏移
+    ceph_le32 fadvise_flags;			// 一些标记
 
     TransactionData() noexcept :
       ops(0),
@@ -232,18 +233,18 @@ public:
 private:
   TransactionData data;
 
-  std::map<coll_t, uint32_t> coll_index;
-  std::map<ghobject_t, uint32_t> object_index;
+  std::map<coll_t, uint32_t> coll_index;	// coll_t -> coll_id 的映射
+  std::map<ghobject_t, uint32_t> object_index;	// object_id 的映射
 
-  uint32_t coll_id = 0;
-  uint32_t object_id = 0;
+  uint32_t coll_id = 0;		// 当前分配的 coll_id 的最大值
+  uint32_t object_id = 0;	// 当前分配的 object_id 的最大值
 
   ceph::buffer::list data_bl;
   ceph::buffer::list op_bl;
 
-  std::list<Context *> on_applied;
-  std::list<Context *> on_commit;
-  std::list<Context *> on_applied_sync;
+  std::list<Context *> on_applied;	// 事务应用完成之后同步的回调函数
+  std::list<Context *> on_commit;	// 事务提交完成之后调用的回调函数
+  std::list<Context *> on_applied_sync;	// 事务应用完成之后再 Finisher 线程里异步调用的回调函数
 
 public:
   Transaction() = default;

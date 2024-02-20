@@ -52,7 +52,12 @@ WRITE_CLASS_ENCODER(bluestore_bdev_label_t)
 std::ostream& operator<<(std::ostream& out, const bluestore_bdev_label_t& l);
 
 /// collection metadata
+/// PG 在磁盘上的数据结构
 struct bluestore_cnode_t {
+  /**
+   * 指示归属于 PG 的对象，在执行到 PG 的映射过程中，其 32 位的全精度哈希值
+   * （从低位开始计算）有多少位是有效的
+   */
   uint32_t bits;   ///< how many bits of coll pgid are significant
 
   explicit bluestore_cnode_t(int b=0) : bits(b) {}
@@ -74,8 +79,9 @@ struct bluestore_interval_t
 {
   static const uint64_t INVALID_OFFSET = ~0ull;
 
-  OFFS_TYPE offset = 0;
-  LEN_TYPE length = 0;
+  // offset 和 length 都是按照硬盘块大小对齐的
+  OFFS_TYPE offset = 0;	// 磁盘上的物理偏移
+  LEN_TYPE length = 0;	// 数据段的长度
 
   bluestore_interval_t(){}
   bluestore_interval_t(uint64_t o, uint64_t l) : offset(o), length(l) {}
@@ -94,6 +100,7 @@ struct bluestore_interval_t
 };
 
 /// pextent: physical extent
+/// 一段连续磁盘物理空间
 struct bluestore_pextent_t : public bluestore_interval_t<uint64_t, uint32_t> 
 {
   bluestore_pextent_t() {}
@@ -432,6 +439,7 @@ WRITE_CLASS_DENC(bluestore_blob_use_tracker_t)
 std::ostream& operator<<(std::ostream& out, const bluestore_blob_use_tracker_t& rm);
 
 /// blob: a piece of data on disk
+/// 一片不一定连续的磁盘物理空间，包含多段 pextent
 struct bluestore_blob_t {
 private:
   PExtentVector extents;              ///< raw data position on device
@@ -450,9 +458,29 @@ public:
 
   uint32_t flags = 0;                 ///< FLAG_*
 
+  /**
+   * blob 所有未被使用物理块的集合。
+   * 以块大小为单位对整个 blob 的物理空间进行划分，使用单个 bit 标识每个区域的状态，
+   * 如果置位，表明该区域包含用户数据；反之表明该区域不包含任何用户数据
+   */
   typedef uint16_t unused_t;
   unused_t unused = 0;     ///< portion that has never been written to (bitmap)
 
+  /**
+   * 校验控制。
+   * csum_type 用于指定一种校验算法类型，典型如 CRC32
+   * csum_chunk_order 用于指定计算校验和时，每次输入的原始数据块大小，
+   *  例如共计 16K 的原始数据，csum_chunk_order 为 12 ，则每次输入 4K (2^12)
+   *  元数据数据计算其校验和，共需要 16/4 = 4 次才能完成校验。值得注意的是，每次计算得到
+   *  的校验和，其长度是固定的，具体取决于所选的校验算法，例如选择 CRC32 ，则每次输入 4K
+   *  的元数据，总是得到固定4个字节的校验和
+   * csum_data 用于保存具体的校验和
+   *  因为 BlueStore 使用 kvDB 保存校验和，测试结果表明每个键值对中键或者值长度超过一定范围时
+   *  kvDB的操作效率会显著降低，所以处于性能考虑，我们一般会限制单个 blob 所能保存数据的最大长度
+   *  进而限制产生的校验和长度。假定此时校验算法选择 CRC32 ，blob 允许保存的最大数据长度为 512KB
+   *  那么至多会产生 512/4*4 = 512 字节长度的校验数据，以免显著降低 kvDB 的访问性能
+   *  注意：出于同样的原因，我么会将对象的 extent_map 切成若干个更小的集合进行存储
+   */
   uint8_t csum_type = Checksummer::CSUM_NONE;      ///< CSUM_*
   uint8_t csum_chunk_order = 0;       ///< csum block size is 1<<block_order bytes
 
@@ -940,28 +968,36 @@ WRITE_CLASS_DENC(bluestore_shared_blob_t)
 std::ostream& operator<<(std::ostream& out, const bluestore_shared_blob_t& o);
 
 /// onode: per-object metadata
+/// 对象在磁盘上的数据结构
 struct bluestore_onode_t {
+  /**
+   * 逻辑标识，单个 bluestore 实例内唯一
+   * nid 主要用来保证对象构建关联的 omap 索引时的唯一性
+   */
   uint64_t nid = 0;                    ///< numeric id (locally unique)
   uint64_t size = 0;                   ///< object size
   // mempool to be assigned to buffer::ptr manually
+  // 对象扩展属性对
   std::map<mempool::bluestore_cache_meta::string, ceph::buffer::ptr> attrs;
 
   struct shard_info {
     uint32_t offset = 0;  ///< logical offset for start of shard
-    uint32_t bytes = 0;   ///< encoded bytes
+    uint32_t bytes = 0;   ///< encoded bytes 分片编码后的长度
     DENC(shard_info, v, p) {
       denc_varint(v.offset, p);
       denc_varint(v.bytes, p);
     }
     void dump(ceph::Formatter *f) const;
   };
+  // 对象关联的 extent map 的分片概要信息，用于从 kvDB 中索引某个具体分片
   std::vector<shard_info> extent_map_shards; ///< extent std::map shards (if any)
 
+  // 上层应用提示信息，用于优化基于对象的读、写、压缩控制等策略
   uint32_t expected_object_size = 0;
   uint32_t expected_write_size = 0;
   uint32_t alloc_hint_flags = 0;
 
-  uint8_t flags = 0;
+  uint8_t flags = 0;	// 标记
 
   std::map<uint32_t, uint64_t> zone_offset_refs;  ///< (zone, offset) refs to this onode
 
@@ -1105,8 +1141,8 @@ struct bluestore_deferred_transaction_t {
 WRITE_CLASS_DENC(bluestore_deferred_transaction_t)
 
 struct bluestore_compression_header_t {
-  uint8_t type = Compressor::COMP_ALG_NONE;
-  uint32_t length = 0;
+  uint8_t type = Compressor::COMP_ALG_NONE;	// 压缩算法类型
+  uint32_t length = 0;				// 数据压缩后的长度
   boost::optional<int32_t> compressor_message;
 
   bluestore_compression_header_t() {}

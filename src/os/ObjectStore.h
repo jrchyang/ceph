@@ -229,6 +229,12 @@ public:
     return queue_transactions(ch, tls, op, handle);
   }
 
+  /**
+   * 所有 objectstore 更新操作的接口。更新相关的操作（例如创建一个对象，修改属性，写数据等）
+   * 都是以事务的方式提交给 objectstore ，该函数被重载成各种不同的接口
+   *
+   * tls - 要提交的事务或者事务列表
+   */
   virtual int queue_transactions(
     CollectionHandle& ch, std::vector<Transaction>& tls,
     TrackedOpRef op = TrackedOpRef(),
@@ -260,7 +266,7 @@ public:
 
   // mgmt
   virtual bool test_mount_in_use() = 0;
-  virtual int mount() = 0;
+  virtual int mount() = 0;		// 加载 objectstore 相关的系统信息
   virtual int umount() = 0;
   virtual int fsck(bool deep) {
     return -EOPNOTSUPP;
@@ -283,7 +289,7 @@ public:
   virtual int validate_hobject_key(const hobject_t &obj) const = 0;
 
   virtual unsigned get_max_attr_name_length() = 0;
-  virtual int mkfs() = 0;  // wipe
+  virtual int mkfs() = 0;      // wipe 创建 objectstore 相关的系统信息
   virtual int mkjournal() = 0; // journal only
   virtual bool needs_journal() = 0;  //< requires a journal
   virtual bool wants_journal() = 0;  //< prefers a journal
@@ -348,6 +354,7 @@ public:
     return false;   // assume a backend cannot, unless it says otherwise
   }
 
+  // 获取 objectstore 相关的系统信息
   virtual int statfs(struct store_statfs_t *buf,
 		     osd_alert_list_t* alerts = nullptr) = 0;
   virtual int pool_statfs(uint64_t pool_id, struct store_statfs_t *buf,
@@ -571,6 +578,7 @@ public:
 
   /**
    * getattr -- get an xattr of an object
+   *            获取属性已经 collection 的对象的扩展属性 xattr
    *
    * @param cid collection for object
    * @param oid oid of object
@@ -693,6 +701,7 @@ public:
 
   /// OMAP
   /// Get omap contents
+  /// 获取属性已经 collection 的对象的 omap 信息
   virtual int omap_get(
     CollectionHandle &c,     ///< [in] Collection containing oid
     const ghobject_t &oid,   ///< [in] Object containing omap

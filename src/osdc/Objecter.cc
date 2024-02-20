@@ -2388,6 +2388,7 @@ void Objecter::_op_submit(Op *op, shunique_lock<ceph::shared_mutex>& sul, ceph_t
   OSDSession *s = NULL;
 
   bool check_for_latest_map = false;
+  // 计算对象的目标 OSD
   int r = _calc_target(&op->target, nullptr);
   switch(r) {
   case RECALC_OP_TARGET_POOL_DNE:
@@ -2401,6 +2402,7 @@ void Objecter::_op_submit(Op *op, shunique_lock<ceph::shared_mutex>& sul, ceph_t
   }
 
   // Try to get a session, including a retry if we need to take write lock
+  // 获取目标 OSD 的链接
   r = _get_session(op->target.osd, &s, sul);
   if (r == -EAGAIN ||
       (check_for_latest_map && sul.owns_lock_shared()) ||
@@ -2461,6 +2463,7 @@ void Objecter::_op_submit(Op *op, shunique_lock<ceph::shared_mutex>& sul, ceph_t
   _session_op_assign(s, op);
 
   if (need_send) {
+    // 发送
     _send_op(op);
   }
 
@@ -2783,6 +2786,7 @@ int Objecter::_calc_target(op_target_t *t, Connection *con, bool any_change)
 		<< (is_write ? " is_write" : "")
 		<< dendl;
 
+  // 根据 pool 信息获取 pg_pool_t 对象
   const pg_pool_t *pi = osdmap->get_pg_pool(t->base_oloc.pool);
   if (!pi) {
     t->osd = -1;
@@ -2828,6 +2832,7 @@ int Objecter::_calc_target(op_target_t *t, Connection *con, bool any_change)
     ceph_assert(t->base_oloc.pool == (int64_t)t->base_pgid.pool());
     pgid = t->base_pgid;
   } else {
+    // 获取目标对象所在的 PG
     int ret = osdmap->object_locator_to_pg(t->target_oid, t->target_oloc,
 					   pgid);
     if (ret == -ENOENT) {
@@ -2852,6 +2857,7 @@ int Objecter::_calc_target(op_target_t *t, Connection *con, bool any_change)
   pg_t actual_pgid(actual_ps, pgid.pool());
   if (!lookup_pg_mapping(actual_pgid, osdmap->get_epoch(), &up, &up_primary,
                          &acting, &acting_primary)) {
+    // 通过 CRUSH 算法获取该 PG 对应的 OSD 列表
     osdmap->pg_to_up_acting_osds(actual_pgid, &up, &up_primary,
                                  &acting, &acting_primary);
     pg_mapping_t pg_mapping(osdmap->get_epoch(),
