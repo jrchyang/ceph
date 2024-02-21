@@ -82,4 +82,7 @@ GTAGS
 
 # Python building things where it shouldn't
 /src/python-common/build/
+
+# build
 .cache
+compile_commands.json
