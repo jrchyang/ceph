@@ -757,16 +757,23 @@ public:
     return f(p, o, l);
   }
 
+  /**
+   * x_off - 对象地址空间的起始偏移量
+   * x_len - 对象地址空间的长度
+   * f - 闭包，指对于设备地址空间上的⼀段空间应该进⾏怎样的操作
+   */
   template<class F>
   int map(uint64_t x_off, uint64_t x_len, F&& f) const {
     auto x_off0 = x_off;
     auto p = extents.begin();
     ceph_assert(p != extents.end());
+    // 找到起始 extent
     while (x_off >= p->length) {
       x_off -= p->length;
       ++p;
       ceph_assert(p != extents.end());
     }
+    // 遍历 extent 执行闭包
     while (x_len > 0 && p != extents.end()) {
       uint64_t l = std::min(p->length - x_off, x_len);
       int r = map_f_invoke(x_off0, *p, p->offset + x_off, l, f);

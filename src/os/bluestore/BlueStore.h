@@ -858,7 +858,7 @@ public:
       boost::intrusive::member_hook<
         OldExtent,
     boost::intrusive::list_member_hook<>,
-    &OldExtent::old_extent_item> > old_extent_map_t;
+    &OldExtent::old_extent_item> > old_extent_map_t; // 双向链表
 
   struct Onode;
 

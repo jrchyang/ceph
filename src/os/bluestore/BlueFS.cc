@@ -2731,6 +2731,18 @@ void BlueFS::_rewrite_log_and_layout_sync_LNF_LD(bool permit_dev_fallback,
  * 5. Apply new log fnode, log is locked for a while.
  *
  * 6. Finalization. Clean up, old space release and total unlocking.
+ *
+ * 0. 锁定日志并禁止其扩展。前者只涉及下面程序的一部分，而后者则完全覆盖了整个程序
+ * 1. 分配一个新的范围以继续记录日志，然后记录一个事件标签，将日志写入位置跳转到新的范围。
+ *    此时，旧的范围将不会被写入，并将所有内容压缩。新事件将被写入我们保留的新区域。
+ *    后者最终将在压缩完成后成为新的日志尾部
+ * 2. 创建新日志。它将包括日志的起始部分、压缩后的元数据正文和上述尾部。
+ *    附加到起始部分和元数据正文的跳转操作将把这些部分连接起来。
+ *    日志锁会在进程中释放，以允许并行访问日志
+ * 3. 写入新的日志内容
+ * 4. 写入新的超级块，以反映所有更改
+ * 5. 应用新日志 fnode，日志被锁定一段时间
+ * 6. 最终完成，清理、释放旧空间并完全解锁
  */
 
 void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer

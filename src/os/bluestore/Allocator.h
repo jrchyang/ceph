@@ -37,6 +37,12 @@ public:
    * as no extent can be lesser than block_size and greater than max_alloc size.
    * Apart from that extents can vary between these lower and higher limits according
    * to free block search algorithm and availability of contiguous space.
+   *
+   * want_size : 期望的大小
+   * block_size : 分配的空间需要进⾏ 对⻬的单位
+   * max_alloc_size : 调⽤者希望的单个extent的空间最⼤值
+   * hint : 希望申请的地址起始点
+   * extents : ⼀个设备物理空间的偏移量和⻓度碎片的数组
    */
   virtual int64_t allocate(uint64_t want_size, uint64_t block_size,
 			   uint64_t max_alloc_size, int64_t hint,

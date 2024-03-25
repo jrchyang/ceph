@@ -3420,6 +3420,13 @@ BlueStore::extent_map_t::iterator BlueStore::ExtentMap::find(
   return extent_map.find(dummy);
 }
 
+/**
+ * 查找包含指定 offset 的 extent
+ * lower_bound 返回的是大于等于 dummy 的迭代器
+ * 因此如果返回的 fp 不是第一个则往前迭代一个以确定返回的 extent 包含 offset
+ * 往前迭代后如果 extent 的 end 小于 offset，即完全不包含 offset 则再次往后迭代
+ * 但由于 extent 可能是稀疏的，所以返回的 extent 起始位置可能大于 offset
+ */
 BlueStore::extent_map_t::iterator BlueStore::ExtentMap::seek_lextent(
   uint64_t offset)
 {
@@ -3521,7 +3528,6 @@ int BlueStore::ExtentMap::compress_extent_map(
 }
 
 // 目标写区域与 extent_map lextent 所有重叠区域分离到 old_extents
-// 原 lextent 收尾也相应调整是否存在可复用 blob 否则创建新的 blob
 void BlueStore::ExtentMap::punch_hole(
   CollectionRef &c, 
   uint64_t offset,
@@ -3530,35 +3536,46 @@ void BlueStore::ExtentMap::punch_hole(
 {
   auto p = seek_lextent(offset);
   uint64_t end = offset + length;
+  // 当前的 extent 不包含要写入的区域
   while (p != extent_map.end()) {
     if (p->logical_offset >= end) {
+      // 当前的 extent 超过写入的区域，不需要再打洞
       break;
     }
+    // 当前 extent 包含部分要写入的区域
     if (p->logical_offset < offset) {
+      // 当前 extent 完整包含了要写入的区域，需要拆分
       if (p->logical_end() > end) {
 	// split and deref middle
 	uint64_t front = offset - p->logical_offset;
+	// oe 表示要写入的区域
 	OldExtent* oe = OldExtent::create(c, offset, p->blob_offset + front, 
 					  length, p->blob);
+	// 覆盖区域加入到 old_extent 中
 	old_extents->push_back(*oe);
+	// 新增表示尾部区域的 extent
 	add(end,
 	    p->blob_offset + front + length,
 	    p->length - front - length,
 	    p->blob);
+	// 调整当前 extent 的长度
 	p->length = front;
 	break;
       } else {
 	// deref tail
+	// 要写入的 offset 到当前 extent 的尾部全部插入到 old_extent 中
 	ceph_assert(p->logical_end() > offset); // else seek_lextent bug
 	uint64_t keep = offset - p->logical_offset;
 	OldExtent* oe = OldExtent::create(c, offset, p->blob_offset + keep,
 					  p->length - keep, p->blob);
 	old_extents->push_back(*oe);
 	p->length = keep;
+	// 下一个 extent 继续判断
 	++p;
 	continue;
       }
     }
+    // 不需要拆分直接 defer 整个 extent 并将其中 extent map 中删除
     if (p->logical_offset + p->length <= end) {
       // deref whole lextent
       OldExtent* oe = OldExtent::create(c, p->logical_offset, p->blob_offset,
@@ -3568,6 +3585,7 @@ void BlueStore::ExtentMap::punch_hole(
       continue;
     }
     // deref head
+    // 头部需要 defer 尾部保留
     uint64_t keep = p->logical_end() - end;
     OldExtent* oe = OldExtent::create(c, p->logical_offset, p->blob_offset,
 				      p->length - keep, p->blob);
@@ -12629,6 +12647,7 @@ void BlueStore::_txc_state_proc(TransContext *txc)
       }
       throttle.log_state_latency(*txc, logger, l_bluestore_state_io_done_lat);
       txc->set_state(TransContext::STATE_KV_QUEUED);
+      // default is false
       if (cct->_conf->bluestore_sync_submit_transaction) {
 	if (txc->last_nid >= nid_max ||
 	    txc->last_blobid >= blobid_max) {
@@ -12655,6 +12674,7 @@ void BlueStore::_txc_state_proc(TransContext *txc)
 	}
       }
       {
+	// 加锁将事务添加到队列中
 	std::lock_guard l(kv_lock);
 	kv_queue.push_back(txc);
 	if (!kv_sync_in_progress) {
@@ -12755,6 +12775,10 @@ void BlueStore::_txc_finish_io(TransContext *txc)
   }
 }
 
+/**
+ * 遍历 TransContext 中记录的对元数据做的改动，并将这些元数据改动生成 kvDB 的事务
+ * 将这个事务也存在 TransContext 中
+ */
 void BlueStore::_txc_write_nodes(TransContext *txc, KeyValueDB::Transaction t)
 {
   dout(20) << __func__ << " txc " << txc
@@ -12900,6 +12924,7 @@ void BlueStore::_txc_apply_kv(TransContext *txc, bool sync_submit_transaction)
     }
 #endif
 
+    // bluestore_debug_omit_kv_commit default is false
     int r = cct->_conf->bluestore_debug_omit_kv_commit ? 0 : db->submit_transaction(txc->t);
     ceph_assert(r == 0);
     txc->set_state(TransContext::STATE_KV_SUBMITTED);
@@ -13354,6 +13379,7 @@ void BlueStore::_kv_sync_thread()
       	}
       }
 
+      // 强制 flush
       if (force_flush) {
 	dout(20) << __func__ << " num_aios=" << aios
 		 << " force_flush=" << (int)force_flush
@@ -14190,7 +14216,6 @@ int BlueStore::queue_transactions(
   TransContext *txc = _txc_create(static_cast<Collection*>(ch.get()), osr,
 				  &on_commit, op);
 
-  // 遍历收集到的 list<Context *> 根据事务对应的操作码分别进行处理
   for (vector<Transaction>::iterator p = tls.begin(); p != tls.end(); ++p) {
     txc->bytes += (*p).get_num_bytes();
     _txc_add_transaction(txc, &(*p));
@@ -14200,10 +14225,15 @@ int BlueStore::queue_transactions(
 
   // 写 ONode 数据（ONode 是常驻内存的数据结构，主要用于管理对象元数据）
   // 持久化时，ONode 数据将被写入到 RocksDB 中
-  // 更新元数据
+  // 写入 rocksdb writebatch 中未写盘
   _txc_write_nodes(txc, txc->t);
 
   // journal deferred items
+  /**
+   * 检查 TransContext 是否有 defer 的需要
+   * 如果有则需要为 defer 生成一个 key-value 对写入 kvDB。所谓 defer 指的是前文提到
+   * 过的先将改动写入 RocksDB，再异步地将数据搬回设备地址空间的机制。
+   */
   if (txc->deferred_txn) {
     txc->deferred_txn->seq = ++deferred_seq;
     bufferlist bl;
@@ -14213,7 +14243,7 @@ int BlueStore::queue_transactions(
     txc->t->set(PREFIX_DEFERRED, key, bl);
   }
 
-  // 状态机处理
+  // 更新 FreeListManager pool 容量信息更新到 txc->t
   _txc_finalize_kv(txc, txc->t);
 
 #ifdef WITH_BLKIN
@@ -14297,6 +14327,19 @@ void BlueStore::_txc_aio_submit(TransContext *txc)
   bdev->aio_submit(&txc->ioc);
 }
 
+/**
+ * 将所有的事务 merge 到 txc 中
+ * txc 中记录了 : 
+ *   所有对 Onode 的改动
+ *   所有新生成的 blob
+ *   所有 IO 报错的 IO ctx
+ * 不同类型的操作 _txc_add_transaction 会执行不一样的逻辑
+ * 该函数执行完成后 :
+ *   事务需要对元数据的改变已经完成
+ *   需要执行的 IO 也已经记录在缓冲区等待执行
+ * 剩下的工作仅仅是将 TransContext 中记录的信息持久化
+ * 因此所有类型的操作之后都只需要执行一样的逻辑
+ */
 void BlueStore::_txc_add_transaction(TransContext *txc, Transaction *t)
 {
   Transaction::iterator i = t->begin();
@@ -14766,6 +14809,7 @@ void BlueStore::_do_write_small(
   bufferlist bl;
   blp.copy(length, bl);
 
+  // 0x10000 Byte
   auto max_bsize = std::max(wctx->target_blob_size, min_alloc_size);
   auto min_off = offset >= max_bsize ? offset - max_bsize : 0;
   uint32_t alloc_len = min_alloc_size;
@@ -14984,6 +15028,7 @@ void BlueStore::_do_write_small(
 
 	  b->dirty_blob().calc_csum(b_off, bl);
 
+	  // default is false
 	  if (!g_conf()->bluestore_debug_omit_block_device_write) {
 	    bluestore_deferred_op_t *op = _get_deferred_op(txc, bl.length());
 	    op->op = bluestore_deferred_op_t::OP_WRITE;
@@ -15170,6 +15215,10 @@ void BlueStore::_do_write_small(
   return;
 }
 
+/**
+ * offset ~ l 这一段区域完全落在 ep 内并且 blob 已分配
+ * 则可以 defer，即 RMW
+ */
 bool BlueStore::BigDeferredWriteContext::can_defer(
     BlueStore::extent_map_t::iterator ep,
     uint64_t prefer_deferred_size,
@@ -15179,6 +15228,7 @@ bool BlueStore::BigDeferredWriteContext::can_defer(
 {
   bool res = false;
   auto& blob = ep->blob->get_blob();
+  // 不在 blob 内则不是 RMW 不需要 defer
   if (offset >= ep->blob_start() &&
     blob.is_mutable()) {
     off = offset;
@@ -15304,11 +15354,13 @@ void BlueStore::_do_write_big(
   logger->inc(l_bluestore_write_big_bytes, length);
   auto max_bsize = std::max(wctx->target_blob_size, min_alloc_size);
   uint64_t prefer_deferred_size_snapshot = prefer_deferred_size.load();
+  // 所有进来的 IO 都是按照最小分配单元 4K 对齐的，但不一定按照 blob 64K 对齐
+  // 这里的 while 循环会按照 blob 对齐的方式切分 IO 下发
   while (length > 0) {
     bool new_blob = false;
     BlobRef b;
     uint32_t b_off = 0;
-    uint32_t l = 0;
+    uint32_t l = 0;  // blob 内的长度
 
     //attempting to reuse existing blob
     if (!wctx->compress) {
@@ -15322,6 +15374,7 @@ void BlueStore::_do_write_big(
 	       << offset << "~" << l
                << std::dec << dendl;
 
+      // prefer_deferred_size 为 64K blob 也是 64K 故一定会进入到这个 if
       if (prefer_deferred_size_snapshot &&
           l <= prefer_deferred_size_snapshot * 2) {
         // Single write that spans two adjusted existing blobs can result
@@ -15338,6 +15391,9 @@ void BlueStore::_do_write_big(
         auto ep_next = end;
         BigDeferredWriteContext head_info, tail_info;
 
+	// ep == end 意味着没有可复用的 extent 也就不需要 defer
+	// can_defer 判断找到的 ep 是否与要写入的区域有重叠
+	// 判断 offset+len 在不在一个 blob 内 即是不是 RMW
         bool will_defer = ep != end ?
           head_info.can_defer(ep,
             prefer_deferred_size_snapshot,
@@ -15408,6 +15464,7 @@ void BlueStore::_do_write_big(
       }
       dout(20) << __func__ << " lookup for blocks to reuse..." << dendl;
 
+      // 执行完成后，重叠区域整理到 old_extent 中，原 extent map 会存在空洞
       o->extent_map.punch_hole(c, offset, l, &wctx->old_extents);
 
       // seek again as punch_hole could invalidate ep
@@ -15419,6 +15476,11 @@ void BlueStore::_do_write_big(
         --prev_ep;
       }
 
+      /**
+       * 向前向后查找可以复用的 blob，如果 offset 小于 max_bsize 则当前的写落在第一个
+       * blob 内，此时 min_off 等于 0，即表示前边没有 blob；
+       * 如果 offset 大于 max_bsize，min_off 则落在前一个 blob 中
+       */
       auto min_off = offset >= max_bsize ? offset - max_bsize : 0;
       // search suitable extent in both forward and reverse direction in
       // [offset - target_max_blob_size, offset + target_max_blob_size] range
@@ -15426,6 +15488,7 @@ void BlueStore::_do_write_big(
       bool any_change;
       do {
 	any_change = false;
+	// 向后找
 	if (ep != end && ep->logical_offset < offset + max_bsize) {
           dout(20) << __func__ << " considering " << *ep
                    << " bstart 0x" << std::hex << ep->blob_start() << std::dec << dendl;
@@ -15672,6 +15735,7 @@ int BlueStore::_do_alloc_write(
   prealloc_left = alloc->allocate(
     need, min_alloc_size, need,
     0, &prealloc);
+  // 空间不足返回失败
   if (prealloc_left < 0 || prealloc_left < (int64_t)need) {
     derr << __func__ << " failed to allocate 0x" << std::hex << need
          << " allocated 0x " << (prealloc_left < 0 ? 0 : prealloc_left)
@@ -15683,6 +15747,7 @@ int BlueStore::_do_alloc_write(
     }
     return -ENOSPC;
   }
+  // 更新统计
   _collect_allocation_stats(need, min_alloc_size, prealloc);
 
   dout(20) << __func__ << std::hex << " need=0x" << need << " data=0x" << data_size
@@ -15755,12 +15820,14 @@ int BlueStore::_do_alloc_write(
     while (left > 0) {
       ceph_assert(prealloc_left > 0);
       if (prealloc_pos->length <= left) {
+	// 当前分配的片段不满足 blob 的长度，全部分配
 	prealloc_left -= prealloc_pos->length;
 	left -= prealloc_pos->length;
 	txc->statfs_delta.allocated() += prealloc_pos->length;
 	extents.push_back(*prealloc_pos);
 	++prealloc_pos;
       } else {
+	// 当前分配的片段满足 blob 的长度，退出循环执行下一个 blob
 	extents.emplace_back(prealloc_pos->offset, left);
 	prealloc_pos->offset += left;
 	prealloc_pos->length -= left;
@@ -15833,6 +15900,10 @@ int BlueStore::_do_alloc_write(
   return 0;
 }
 
+/**
+ * 清理 txc 的 old extents 以及 release sharedbblob
+ * 应该是针对 RMW 写模式，在完成新的 Extent 分配后去掉对老的 Extent 引用
+ */
 void BlueStore::_wctx_finish(
   TransContext *txc,
   CollectionRef& c,
@@ -16085,6 +16156,7 @@ void BlueStore::_choose_write_options(
     }
   }
 
+  // 默认 64K => 0x10000
   uint64_t max_bsize = max_blob_size.load();
   if (wctx->target_blob_size == 0 || wctx->target_blob_size > max_bsize) {
     wctx->target_blob_size = max_bsize;
@@ -16198,6 +16270,7 @@ int BlueStore::_do_write(
 
   WriteContext wctx;
   _choose_write_options(c, o, fadvise_flags, &wctx);
+  // 加载 shard
   o->extent_map.fault_range(db, offset, length);
   _do_write_data(txc, c, o, offset, length, bl, &wctx);
   r = _do_alloc_write(txc, c, o, &wctx);
@@ -17718,7 +17791,7 @@ void BlueStore::_record_onode(OnodeRef& o, KeyValueDB::Transaction &txn)
 	    << extent_part << " bytes inline extents)"
 	    << dendl;
 
-
+  // 调用 rocksdb writebatch put 接口，将操作插入到批量操作中，尚未写盘
   txn->set(PREFIX_OBJ, o->key.c_str(), o->key.size(), bl);
 }
 
