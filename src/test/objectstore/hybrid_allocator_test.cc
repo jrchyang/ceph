@@ -5,6 +5,8 @@
 #include <gtest/gtest.h>
 
 #include "os/bluestore/HybridAllocator.h"
+#include "os/bluestore/FreelistManager.h"
+#include "os/bluestore/bluestore_types.h"
 
 class TestHybridAllocator : public HybridAllocator {
 public:
@@ -23,6 +25,15 @@ public:
   }
   uint64_t get_avl_free() {
     return AvlAllocator::get_free();
+  }
+  BitmapAllocator* get_bmap_allocator() {
+    return get_bmap();
+  }
+  uint64_t get_avl_size() {
+    return AvlAllocator::get_size();
+  }
+  uint64_t get_lowest_size_available() {
+    return _lowest_size_available();
   }
 };
 
@@ -227,5 +238,63 @@ TEST(HybridAllocator, fragmentation)
 
     // which results in the following total fragmentation
     ASSERT_EQ(0.5 * 7 / 8 + 1.0 / 8, ha.get_fragmentation());
+  }
+}
+
+TEST(HybridAllocator, fragmentation_alloc)
+{
+  /**
+   * 覆盖写场景
+   *
+   * 单个 object 占用 0x2b000 ( 176128 ) 字节
+   * 覆盖写的 object 释放的空间为 0x2a000 ( 172032 ) 字节
+   * 最小分配单元是 0x1000 ( 4096 ) 字节
+   * 共占用 176128 / 4096 = 43 个 bit
+   * 按照 1/60 的比例 bit 设置如下：
+   * 43 dirty + 43 cleab + 43 dirty + 43 clean ... 43 dirty + 42 clean + 1 dirty
+   */
+  {
+    uint64_t i;
+    uint64_t offset = 0;
+    uint64_t length = 176128;
+    uint64_t release_length = 172032;
+    uint64_t fio_length = 700416;
+    uint64_t obj_num = 10;
+    uint64_t loop_cnt = obj_num / 2;
+    uint64_t avl_max_mem = 4096;
+    uint64_t avl_max_entry = avl_max_mem / sizeof(range_seg_t);
+
+    TestHybridAllocator ha(g_ceph_context, 10000831348736, 4096,
+      avl_max_mem, "test_hybrid_allocator");
+
+    offset = 0;
+    for (i = 0; i < avl_max_entry; ++i, offset += 2 * fio_length) {
+      ha.init_add_free(offset, fio_length);
+    }
+
+    offset += 2 * fio_length;
+    ha.init_add_free(offset, release_length);
+
+    offset += 2 * fio_length;
+    for (i = 0; i <= loop_cnt; ++i, offset += 2 * length) {
+      ha.init_add_free(offset, length);
+    }
+
+    std::cout << "device size is " << ha.get_capacity() << std::endl;
+    std::cout << "block size is " << ha.get_block_size() << std::endl;
+    std::cout << "range size tree size is " << ha.get_avl_size() << std::endl;
+    std::cout << "range size tree max entry is " << avl_max_entry << std::endl;
+    std::cout << "lowest size is " <<  ha.get_lowest_size_available() << std::endl;
+    std::cout << "bitmap free is " << ha.get_bmap_free() << std::endl;
+    std::cout << "fragmentation is " << ha.get_fragmentation() * 1000 << std::endl;
+
+    for (i = 0; i < loop_cnt + 10; ++i) {
+      PExtentVector pextents;
+      ha.allocate(176128, 4096, 176128, 0, &pextents);
+      for (auto it = pextents.begin(); it != pextents.end(); ++it) {
+	std::cout << "[0x" << std::hex << it->offset << "~" << it->length << std::dec << "] ";
+      }
+      std::cout << std::endl;
+    }
   }
 }

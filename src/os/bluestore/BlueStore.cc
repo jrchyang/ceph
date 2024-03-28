@@ -5679,6 +5679,7 @@ int BlueStore::_open_fm(KeyValueDB::Transaction t,
       fm->allocate(0, reserved, t);
     }
     // debug code - not needed for NULL FM
+    // 调试代码 - 模拟碎片问题
     if (cct->_conf->bluestore_debug_prefill > 0) {
       uint64_t end = bdev->get_size() - reserved;
       dout(1) << __func__ << " pre-fragmenting freespace, using "
@@ -5720,7 +5721,7 @@ int BlueStore::_open_fm(KeyValueDB::Transaction t,
 	start += l + u;
       }
     }
-    r = _write_out_fm_meta(0);
+    r = _write_out_fm_meta(0); // 写到 hdd super block
     ceph_assert(r == 0);
   } else {
     if (can_have_null_fm) {

@@ -83,6 +83,7 @@ public:
     PExtentVector *extents) override;
   void release(const interval_set<uint64_t>& release_set) override;
   uint64_t get_free() override;
+  uint64_t get_size();
   double get_fragmentation() override;
 
   void dump() override;
@@ -150,6 +151,8 @@ private:
    * it's allocation strategy.  Once the allocator cannot satisfy
    * an allocation of this size then it switches to using more
    * aggressive strategy (i.e search by size rather than offset).
+   *
+   * 当剩余空间的最大块小于该值时分配策略从 first-fit 切换到 best-fit
    */
   uint64_t range_size_alloc_threshold = 0;
   /*
@@ -157,23 +160,30 @@ private:
    * in allocator to continue allocations in a first-fit fashion.
    * Once the allocator's free space drops below this level we dynamically
    * switch to using best-fit allocations.
+   *
+   * 当总体剩余空间百分比小于该值时分配策略从 first-fit 切换到 best-fit
    */
   int range_size_alloc_free_pct = 0;
   /*
    * Maximum number of segments to check in the first-fit mode, without this
    * limit, fragmented device can see lots of iterations and _block_picker()
    * becomes the performance limiting factor on high-performance storage.
+   *
+   * first-fit 分配策略下的最大搜索次数，超过该值时切换到 best-fit
    */
   const uint32_t max_search_count;
   /*
    * Maximum distance to search forward from the last offset, without this
    * limit, fragmented device can see lots of iterations and _block_picker()
    * becomes the performance limiting factor on high-performance storage.
+   *
+   * first-fit 分配策略下的最大搜索字节数，超过该值时切换到 best-fit
    */
   const uint32_t max_search_bytes;
   /*
-  * Max amount of range entries allowed. 0 - unlimited
-  */
+   * Max amount of range entries allowed. 0 - unlimited
+   * val tree 的最大节点个数
+   */
   uint64_t range_count_cap = 0;
 
   void _range_size_tree_rm(range_seg_t& r) {
@@ -196,6 +206,11 @@ private:
     bool res = !range_count_cap || range_size_tree.size() < range_count_cap;
     bool remove_lowest = false;
     if (!res) {
+      /**
+       * 当要插入的 range 长度大于当前最小长度的时候
+       *   将最小 range 放到 bitmap 中
+       *   将当前 range 插入到 avl tree 中
+       */
       if (end - start > _lowest_size_available()) {
         remove_lowest = true;
         res = true;

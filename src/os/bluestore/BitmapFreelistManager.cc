@@ -22,6 +22,7 @@ using ceph::encode;
 
 void make_offset_key(uint64_t offset, std::string *key)
 {
+  // key 占 10 个字节
   key->reserve(10);
   _key_encode_u64(offset, key);
 }
@@ -71,10 +72,14 @@ int BitmapFreelistManager::create(uint64_t new_size, uint64_t granularity,
   bytes_per_block = granularity;
   ceph_assert(isp2(bytes_per_block));
   size = p2align(new_size, bytes_per_block);
+  // 默认 128
   blocks_per_key = cct->_conf->bluestore_freelist_blocks_per_key;
 
   _init_misc();
 
+  // blocks 根据 bytes_per_block & blocks_per_key 向上取整
+  // 当超过磁盘大小时将多出的部分全部标脏
+  // 这么做是为了能够对齐处理 block kvDB
   blocks = size_2_block_count(size);
   if (blocks * bytes_per_block > size) {
     dout(10) << __func__ << " rounding blocks up from 0x" << std::hex << size
@@ -280,7 +285,9 @@ int BitmapFreelistManager::_read_cfg(
 
 void BitmapFreelistManager::_init_misc()
 {
+  // >> 3 == / 8 => bits to bytes
   bufferptr z(blocks_per_key >> 3);
+  // 全部标脏
   memset(z.c_str(), 0xff, z.length());
   all_set_bl.clear();
   all_set_bl.append(z);
@@ -511,6 +518,7 @@ void BitmapFreelistManager::_xor(
   ceph_assert((offset & block_mask) == offset);
   ceph_assert((length & block_mask) == length);
 
+  // 取整
   uint64_t first_key = offset & key_mask;
   uint64_t last_key = (offset + length - 1) & key_mask;
   dout(20) << __func__ << " first_key 0x" << std::hex << first_key
@@ -519,8 +527,16 @@ void BitmapFreelistManager::_xor(
   if (first_key == last_key) {
     bufferptr p(blocks_per_key >> 3);
     p.zero();
+    // s 等于 offset 在单个 key 内的 block 索引
     unsigned s = (offset & ~key_mask) / bytes_per_block;
+    // e 等于 end 在单个 key 内的 block 索引
     unsigned e = ((offset + length - 1) & ~key_mask) / bytes_per_block;
+    /**
+     * 遍历 s 到 e 的 block
+     * 一个 block 用一个 bit 表示，p[] 取的是某个字节，i >> 3 即获取 block 的 bit 在哪个字节中
+     * i & 7 即 block 索引在一个字节内的索引
+     * 执行完成后 offset ~ len 所覆盖的 block 对应的 bit 全部标脏/清零
+     */
     for (unsigned i = s; i <= e; ++i) {
       p[i >> 3] ^= 1ull << (i & 7);
     }

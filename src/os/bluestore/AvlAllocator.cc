@@ -233,17 +233,28 @@ int64_t AvlAllocator::_allocate(
   return allocated ? allocated : -ENOSPC;
 }
 
+/**
+ * size : 要分配的大小
+ * unit : 最小分配单元
+ * offset : 保存分配的磁盘偏移
+ * length : 保存分配的长度
+ */
 int AvlAllocator::_allocate(
   uint64_t size,
   uint64_t unit,
   uint64_t *offset,
   uint64_t *length)
 {
+  /**
+   * p 指向 range_size_tree 的最后一个元素
+   * max_size 表示最大连续空间
+   */
   uint64_t max_size = 0;
   if (auto p = range_size_tree.rbegin(); p != range_size_tree.rend()) {
     max_size = p->end - p->start;
   }
 
+  // 如果最大连续空间小于需要的空间则强制使用 best-fit 策略分配
   bool force_range_size_alloc = false;
   if (max_size < size) {
     if (max_size < unit) {
@@ -254,7 +265,7 @@ int AvlAllocator::_allocate(
     force_range_size_alloc = true;
   }
 
-  const int free_pct = num_free * 100 / device_size;
+  const int free_pct = num_free * 100 / device_size;  // 计算空闲率
   uint64_t start = 0;
   // If we're running low on space, find a range by size by looking up in the size
   // sorted tree (best-fit), instead of searching in the area pointed by cursor
@@ -395,6 +406,12 @@ uint64_t AvlAllocator::get_free()
 {
   std::lock_guard l(lock);
   return num_free;
+}
+
+uint64_t AvlAllocator::get_size()
+{
+  std::lock_guard l(lock);
+  return range_size_tree.size();
 }
 
 double AvlAllocator::get_fragmentation()

@@ -215,6 +215,11 @@ void HybridAllocator::_spillover_range(uint64_t start, uint64_t end)
 
 void HybridAllocator::_add_to_tree(uint64_t start, uint64_t size)
 {
+  /**
+   * 在 BitmapAllocator 中查找相邻的空闲空间
+   * 合并后向 AvlAllocator 中插入以增加在 AvlTree 中合并的几率
+   * 如果在 AvlTree 中没有合并最终还会插入会 BitmapAllocator
+   */
   if (bmap_alloc) {
     uint64_t head = bmap_alloc->claim_free_to_left(start);
     uint64_t tail = bmap_alloc->claim_free_to_right(start + size);
