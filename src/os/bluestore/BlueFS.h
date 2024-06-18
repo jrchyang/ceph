@@ -78,19 +78,33 @@ enum {
 
 class BlueFSVolumeSelector {
 public:
+  // 提供给 rocksdb db_paths 参数的 目录和目录空间 对
+  // 用于 rocksdb 计算哪些 level 的 sst 文件保存在哪些目录中
   typedef std::vector<std::pair<std::string, uint64_t>> paths;
 
   virtual ~BlueFSVolumeSelector() {
   }
+  // 获取 bluefs log 文件对应的 LEVEL
   virtual void* get_hint_for_log() const = 0;
+  // 根据 rocksdb 文件所在的目录返回文件对应的 LEVEL
+  // 目录最多为 db 和 db.slow 两个固定的目录
   virtual void* get_hint_by_dir(std::string_view dirname) const = 0;
 
+  /**
+   * add_usage/sub_usage 主要用于 RocksDBBlueFSVolumeSelector 卷管理器
+   * 用于统计各个 LEVEL 的文件在各个 bdev 上的空间占用情况
+   * 从而决定是否为 LEVEL_SLOW 的文件分配 LEVEL_DB 的空间
+   */
   virtual void add_usage(void* file_hint, const bluefs_fnode_t& fnode) = 0;
   virtual void sub_usage(void* file_hint, const bluefs_fnode_t& fnode) = 0;
   virtual void add_usage(void* file_hint, uint64_t fsize) = 0;
   virtual void sub_usage(void* file_hint, uint64_t fsize) = 0;
+
+  // 根据文件 LEVEL 选择合适的 bdev
   virtual uint8_t select_prefer_bdev(void* hint) = 0;
+  // 返回 paths 给 rocksdb
   virtual void get_paths(const std::string& base, paths& res) const = 0;
+  // 主要用于 RocksDBBlueFSVolumeSelector 返回文件及磁盘的状态
   virtual void dump(std::ostream& sout) = 0;
 
   /* used for sanity checking of vselector */
@@ -714,7 +728,10 @@ public:
     uint64_t _slow_total)
     : wal_total(_wal_total), db_total(_db_total), slow_total(_slow_total) {}
 
+  // 返回 BlueFS::BDEV_WAL 设备
   void* get_hint_for_log() const override;
+  // db 目录的文件返回 BlueFS::BDEV_DB
+  // db.slow 目录的文件返回  BlueFS::BDEV_SLOW
   void* get_hint_by_dir(std::string_view dirname) const override;
 
   void add_usage(void* hint, const bluefs_fnode_t& fnode) override {

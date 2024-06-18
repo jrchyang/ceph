@@ -4212,8 +4212,8 @@ class RocksDBBlueFSVolumeSelector : public BlueFSVolumeSelector
     LEVEL_SLOW,
     LEVEL_MAX
   };
-  // add +1 row for corresponding per-device totals
-  // add +1 column for per-level actual (taken from file size) total
+  // add +1 row for per-level actual (taken from file size) total
+  // add +1 column for corresponding per-device totals
   typedef matrix_2d<std::atomic<uint64_t>, BlueFS::MAX_BDEV + 1, LEVEL_MAX - LEVEL_FIRST + 1> per_level_per_dev_usage_t;
 
   per_level_per_dev_usage_t per_level_per_dev_usage;
@@ -4226,7 +4226,7 @@ class RocksDBBlueFSVolumeSelector : public BlueFSVolumeSelector
   per_level_per_dev_usage_t per_level_per_dev_max;
 
   uint64_t l_totals[LEVEL_MAX - LEVEL_FIRST];
-  uint64_t db_avail4slow = 0;
+  uint64_t db_avail4slow = 0; // db 可用空间
   enum {
     OLD_POLICY,
     USE_SOME_EXTRA

@@ -18142,11 +18142,13 @@ uint8_t RocksDBBlueFSVolumeSelector::select_prefer_bdev(void* h) {
   switch (hint) {
   case LEVEL_SLOW:
     res = BlueFS::BDEV_SLOW;
+    // 如果 BDEV_DB 还有可以借给 SLOW 的空间，则返回 DB
     if (db_avail4slow > 0) {
       // considering statically available db space vs.
       // - observed maximums on DB dev for DB/WAL/UNSORTED data
       // - observed maximum spillovers
       uint64_t max_db_use = 0; // max db usage we potentially observed
+      // 统计各 LEVEL 文件在 DB 中的历史最大空间占用
       max_db_use += per_level_per_dev_max.at(BlueFS::BDEV_DB, LEVEL_LOG - LEVEL_FIRST);
       max_db_use += per_level_per_dev_max.at(BlueFS::BDEV_DB, LEVEL_WAL - LEVEL_FIRST);
       max_db_use += per_level_per_dev_max.at(BlueFS::BDEV_DB, LEVEL_DB - LEVEL_FIRST);
@@ -18210,7 +18212,7 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
 
   sout << "RocksDBBlueFSVolumeSelector Usage Matrix:" << std::endl;
   constexpr std::array<const char*, 8> names{ {
-    "DEV/LEV",
+    "LEV/DEV",
     "WAL",
     "DB",
     "SLOW",
