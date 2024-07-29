@@ -349,11 +349,22 @@ BlueRocksEnv::BlueRocksEnv(BlueFS *f)
 
 }
 
+/**
+ * 文件缓存（用于预读）设置为 bluefs_max_prefetch 大小
+ */
 rocksdb::Status BlueRocksEnv::NewSequentialFile(
   const std::string& fname,
   std::unique_ptr<rocksdb::SequentialFile>* result,
   const rocksdb::EnvOptions& options)
 {
+  /**
+   * 如果文件以 / 开头（即通过绝对路径指定）则通过 rocksdb 默认 env（传统文件系统）创建
+   * 这里特殊处理的推测如下：
+   *   rocksdb 支持单独配置 db_log_dir 和 wal_dir，如果未指定，则相关文件与 data 存放
+   *   在同一目录，如果指定，则单独存放，且指定时需要使用绝对路径。
+   *   bluefs 主要用于处理 rocksdb 的数据文件，因此当 rocksdb 被指定如上参数时可保证
+   *   其保存到指定的位置
+   */
   if (fname[0] == '/')
     return target()->NewSequentialFile(fname, result, options);
   auto [dir, file] = split(fname);
@@ -365,6 +376,9 @@ rocksdb::Status BlueRocksEnv::NewSequentialFile(
   return rocksdb::Status::OK();
 }
 
+/**
+ * 文件缓存（用于预读）设置为 4K
+ */
 rocksdb::Status BlueRocksEnv::NewRandomAccessFile(
   const std::string& fname,
   std::unique_ptr<rocksdb::RandomAccessFile>* result,

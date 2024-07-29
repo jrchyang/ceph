@@ -156,15 +156,17 @@ public:
     bluefs_fnode_t fnode;	// 文件 inode
     int refs;			// 引用计数
     uint64_t dirty_seq;		// dirty 序列号
-    bool locked;
-    bool deleted;
-    bool is_dirty;
+    bool locked;		// 表示文件是否加锁
+    bool deleted;		//
+    bool is_dirty;		// 表示文件元数据发生变化需要更新 log
+    // 用于将本文件链接到待刷新文件列表中
     boost::intrusive::list_member_hook<> dirty_item;
 
     // 读写计数
     std::atomic_int num_readers, num_writers;
     std::atomic_int num_reading;
 
+    // 卷选择器提示
     void* vselector_hint = nullptr;
     /* lock protects fnode and other the parts that can be modified during read & write operations.
        Does not protect values that are fixed
@@ -293,7 +295,7 @@ public:
     MEMPOOL_CLASS_HELPERS();
 
     uint64_t bl_off = 0;    ///< prefetch buffer logical offset
-    ceph::buffer::list bl;          ///< prefetch buffer
+    ceph::buffer::list bl;  ///< prefetch buffer
     uint64_t pos = 0;       ///< current logical offset
     uint64_t max_prefetch;  ///< max allowed prefetch
 

@@ -14,6 +14,10 @@ RefCountedObject::~RefCountedObject()
   ceph_assert(nref == 0);
 }
 
+/**
+ * put 时对象的引用计数减一
+ * 如果减完之后等于 0，则释放该对象
+ */
 void RefCountedObject::put() const {
   CephContext *local_cct = cct;
   auto v = --nref;
@@ -31,6 +35,9 @@ void RefCountedObject::put() const {
   }
 }
 
+/**
+ * 递增引用计数
+ */
 void RefCountedObject::_get() const {
   auto v = ++nref;
   ceph_assert(v > 1); /* it should never happen that _get() sees nref == 0 */

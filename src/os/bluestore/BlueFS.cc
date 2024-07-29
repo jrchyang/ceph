@@ -4320,6 +4320,11 @@ int BlueFS::unlock_file(FileLock *fl)/*_N*/
   return 0;
 }
 
+/**
+ * 如果目录以 / 结尾则删除它
+ * 如果 dirname 为空则读取所有的目录名
+ * 如果 dirname 不为空则获取该 dir 目录下的所有文件名
+ */
 int BlueFS::readdir(std::string_view dirname, vector<string> *ls)/*_N*/
 {
   // dirname may contain a trailing /

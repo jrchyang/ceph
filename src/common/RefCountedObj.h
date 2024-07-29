@@ -41,6 +41,10 @@
  *
  */
 namespace TOPNSPC::common {
+// 作为引用计数管理的基类
+// 在使用 boost::intrusive_ptr 类型来管理内存的应用计数时，需要目标类提供递增和递减目标对象
+// 引用计数的成员函数，为了使用方便，提供该类型，每个需要通过 boost::intrusive_ptr 来管理
+// 的类型继承该类型，然后在目标类内部使用 FRIEND_MAKE_REF 来声明友元函数
 class RefCountedObject {
 public:
   void set_cct(CephContext *c) {
@@ -78,6 +82,7 @@ private:
   // crimson is single threaded at the moment
   mutable uint64_t nref{1};
 #else
+  // 初始化为 1
   mutable std::atomic<uint64_t> nref{1};
 #endif
   CephContext *cct{nullptr};

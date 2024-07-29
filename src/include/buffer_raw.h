@@ -30,6 +30,8 @@ inline namespace v15_2_0 {
   public:
     // In the future we might want to have a slab allocator here with few
     // embedded slots. This would allow to avoid the "if" in dtor of ptr_node.
+    //
+    // std::aligned_storage 用于在编译时分配对齐的内存空间
     std::aligned_storage<sizeof(ptr_node),
 			 alignof(ptr_node)>::type bptr_storage;
   protected:
