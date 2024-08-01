@@ -4177,6 +4177,17 @@ private:
 
 };
 
+/**
+ * RocksDB 创建文件的规则
+ *   1. 创建 RocksDB 数据库是，会传入两个目录和对应大小
+ *   2. RocksDB 根据各层级文件的预估大小，选择哪些层级的文件分别写到哪个目录
+ *   3. 在 BlueStore 中传入了 db 和 slow 两个分区和其大小
+ *
+ * 该卷选择器的主要作用是评估是否可以将写到 SLOW 分区的文件重定向到 DB 分区，解决 DB 空间浪费的问题
+ *   1. 该选择器维护了一个内存数据结构，用于统计 WAL、DB、SLOW 三个分区的最大和当前使用空间大小
+ *   2. 当 RocksDB 将文件创建到 slow 目录时，默认会到 SLOW 分区分配空间，此时卷选择器
+ *      根据 DB 历史最大空间与当前可用空间对比，来判断是否可以将该 slow 目录的文件写到 DB 分区上
+ */
 class RocksDBBlueFSVolumeSelector : public BlueFSVolumeSelector
 {
   template <class T, size_t MaxX, size_t MaxY>

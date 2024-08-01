@@ -154,8 +154,8 @@ public:
     MEMPOOL_CLASS_HELPERS();
 
     bluefs_fnode_t fnode;	// 文件 inode
-    int refs;			// 引用计数
-    uint64_t dirty_seq;		// dirty 序列号
+    uint64_t       dirty_seq;	// dirty 序列号，会以该序列号为索引插入到 dirty->files 中
+    int  refs;			// 引用计数
     bool locked;		// 表示文件是否加锁
     bool deleted;		//
     bool is_dirty;		// 表示文件元数据发生变化需要更新 log
@@ -197,6 +197,12 @@ public:
   };
   using FileRef = ceph::ref_t<File>;
 
+  // boost::intrusive::list 表示声明一个该类型链表的实例
+  // File 表示该链表的成员是 File
+  // boost::intrusive::member_hook<> 用来指定钩子
+  //   File 表示钩子所在结构体
+  //   boost::intrusive::list_member_hook<> 表示钩子是上面结构体中的一个成员变量
+  //   &File::dirty_item 用来起钩子作用的变量
   typedef boost::intrusive::list<
       File,
       boost::intrusive::member_hook<
@@ -328,13 +334,13 @@ public:
   struct FileReader {
     MEMPOOL_CLASS_HELPERS();
 
-    FileRef file;
-    FileReaderBuffer buf;
+    FileRef file;		// 指向对应的文件，引用计数为 0 时自动释放
+    FileReaderBuffer buf;	// 指向一个 bufferlist
     bool random;
     bool ignore_eof;        ///< used when reading our log file
 
     ceph::shared_mutex lock {
-     ceph::make_shared_mutex(std::string(), false, false, false)
+      ceph::make_shared_mutex(std::string(), false, false, false)
     };
 
 
@@ -371,7 +377,7 @@ private:
 
   // cache
   struct {
-    ceph::mutex lock = ceph::make_mutex("BlueFS::nodes.lock");
+    ceph::mutex lock = ceph::make_mutex("BlueFS::nodes.lock");      // 访问内存的互斥锁
     mempool::bluefs::map<std::string, DirRef, std::less<>> dir_map; // 所有的目录
     mempool::bluefs::unordered_map<uint64_t, FileRef> file_map;     // 所有的文件
   } nodes;
@@ -380,7 +386,7 @@ private:
   uint64_t ino_last = 0;       ///< last assigned ino (this one is in use)
 
   struct {
-    ceph::mutex lock = ceph::make_mutex("BlueFS::log.lock");
+    ceph::mutex lock = ceph::make_mutex("BlueFS::log.lock"); // 日志文件的锁
     uint64_t seq_live = 1;   //seq that log is currently writing to; mirrors dirty.seq_live
     FileWriter *writer = 0;
     bluefs_transaction_t t;
@@ -388,9 +394,12 @@ private:
 
   struct {
     ceph::mutex lock = ceph::make_mutex("BlueFS::dirty.lock");
-    uint64_t seq_stable = 0; //seq that is now stable on disk
-    uint64_t seq_live = 1;   //seq that is ongoing and dirty files will be written to
+    uint64_t seq_stable = 0; // seq that is now stable on disk
+			     // 已经写到磁盘 log 上的元数据批次
+    uint64_t seq_live = 1;   // seq that is ongoing and dirty files will be written to
+			     // 等待写入磁盘 log 的元数据批次
     // map of dirty files, files of same dirty_seq are grouped into list.
+    // 第一个成员指向 dirty_seq
     std::map<uint64_t, dirty_file_list_t> files;
     std::vector<interval_set<uint64_t>> pending_release; ///< extents to release
     // TODO: it should be examined what makes pending_release immune to
@@ -561,6 +570,7 @@ private:
     return 4096;
   }
   void _maybe_check_vselector_LNF() {
+    // 默认为 false
     if (cct->_conf->bluefs_check_volume_selector_often) {
       _check_vselector_LNF();
     }
@@ -783,7 +793,7 @@ public:
  * nodes      N |           | > | >
  * dirty      D |           |   | >
  * File       F |
- * 
+ *
  * Claim: Deadlock is possible IFF graph contains cycles.
  */
 #endif

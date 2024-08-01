@@ -650,11 +650,12 @@ struct error_code;
       typedef typename std::conditional<is_const,
 					typename buffers_t::const_iterator,
 					typename buffers_t::iterator>::type list_iter_t;
-      bl_t* bl;
-      list_t* ls;  // meh.. just here to avoid an extra pointer dereference..
-      list_iter_t p;
-      unsigned off; // in bl
-      unsigned p_off;   // in *p
+      bl_t* bl;		// 指针指向 bufferlist
+      list_t* ls;	// meh.. just here to avoid an extra pointer dereference..
+			// 指针指向 bufferlist 的成员 _buffers
+      list_iter_t p;	// 类型是 std::list::iterator，用来迭代遍历 bufferlist 中的 bufferptr
+      unsigned off;	// in bl，如果将整个 bufferlist 看成一个 buffer::raw，当前位置在整个 bufferlist 的偏移量
+      unsigned p_off;   // in *p，当前位置在对应的 bufferptr 中的偏移量
       friend class iterator_impl<true>;
 
     public:

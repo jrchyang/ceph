@@ -259,6 +259,7 @@ struct bluefs_transaction_t {
 
     // bluefs 日志文件的 compaction 操作
     OP_JUMP,        ///< jump the seq # and offset
+		    ///< 跳过一段空间，这段空间没有数据
     OP_JUMP_SEQ,    ///< jump the seq #
     OP_FILE_UPDATE_INC, ///< incremental update file metadata (file)
   } op_t;

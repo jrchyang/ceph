@@ -126,9 +126,11 @@ mempool::bluefs::vector<bluefs_extent_t>::iterator bluefs_fnode_t::seek(
   auto p = extents.begin();
 
   if (extents_index.size() > 4) {
+    // 在 [begin, end) 范围内查找第一个大于 offset 的元素
     auto it = std::upper_bound(extents_index.begin(), extents_index.end(),
       offset);
     assert(it != extents_index.begin());
+    // 回退一个位置
     --it;
     assert(offset >= *it);
     p += it - extents_index.begin();
@@ -136,6 +138,8 @@ mempool::bluefs::vector<bluefs_extent_t>::iterator bluefs_fnode_t::seek(
   }
 
   while (p != extents.end()) {
+    // offset >= p->length 表明当前 extent 的 start+length < offset
+    // 需要查看下一个 extent
     if ((int64_t) offset >= p->length) {
       offset -= p->length;
       ++p;
@@ -143,6 +147,7 @@ mempool::bluefs::vector<bluefs_extent_t>::iterator bluefs_fnode_t::seek(
       break;
     }
   }
+  // x_off 表示 offset 在 extent 内的偏移
   *x_off = offset;
   return p;
 }

@@ -35,10 +35,10 @@ inline namespace v15_2_0 {
     std::aligned_storage<sizeof(ptr_node),
 			 alignof(ptr_node)>::type bptr_storage;
   protected:
-    char *data;
-    unsigned len;
+    char *data;				// 指向真正的数据
+    unsigned len;			// 数据区域的长度
   public:
-    ceph::atomic<unsigned> nref { 0 };
+    ceph::atomic<unsigned> nref { 0 };	// 这段内存的引用计数
     int mempool;
 
     std::pair<size_t, size_t> last_crc_offset {std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max()};

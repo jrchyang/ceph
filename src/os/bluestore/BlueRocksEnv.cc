@@ -47,6 +47,35 @@ split(const std::string &fn)
 
 }
 
+/**
+ * BlueRocksEnv 调用 BlueFS 的接口如下：
+ *
+ *   int BlueFS::rename(std::string_view old_dirname, std::string_view old_filename, std::string_view new_dirname, std::string_view new_filename)
+ *   bool BlueFS::dir_exists(std::string_view dirname)
+ *   int BlueFS::stat(std::string_view dirname, std::string_view filename, uint64_t *size, utime_t *mtime)
+ *   int BlueFS::readdir(std::string_view dirname, vector<string> *ls)
+ *   int BlueFS::unlink(std::string_view dirname, std::string_view filename)
+ *   int BlueFS::mkdir(std::string_view dirname)
+ *   int BlueFS::rmdir(std::string_view dirname)
+ *   int BlueFS::lock_file(std::string_view dirname, std::string_view filename, FileLock **plock)
+ *   int BlueFS::unlock_file(FileLock *fl)
+ *
+ *   int BlueFS::open_for_read(std::string_view dirname, std::string_view filename, FileReader **h, bool random)
+ *   int BlueFS::open_for_write(std::string_view dirname, std::string_view filename, FileWriter **h, bool overwrite)
+ *   void BlueFS::invalidate_cache(FileRef f, uint64_t offset, uint64_t length)
+ *   void BlueFS::close_writer(FileWriter *h)
+ *
+ *   int BlueFS::truncate(FileWriter *h, uint64_t offset)
+ *   int BlueFS::preallocate(FileRef f, uint64_t off, uint64_t len)
+ *   int64_t BlueFS::read(FileReader *h, uint64_t offset, size_t len, ceph::buffer::list *outbl, char *out)
+ *   int64_t BlueFS::read_random(FileReader *h, uint64_t offset, size_t len, char *out)
+ *   void BlueFS::append_try_flush(FileWriter *h, const char* buf, size_t len)
+ *   void BlueFS::flush(FileWriter *h, bool force)
+ *   void BlueFS::flush_range(FileWriter *h, uint64_t offset, uint64_t length)
+ *   int BlueFS::fsync(FileWriter *h)
+ *   void BlueFS::sync_metadata(bool avoid_compact)
+ */
+
 // A file abstraction for reading sequentially through a file
 class BlueRocksSequentialFile : public rocksdb::SequentialFile {
   BlueFS *fs;

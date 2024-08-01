@@ -1188,6 +1188,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
     std::cout << " log_fnode " << super.log_fnode << std::endl;
   } 
 
+  // 配置读句柄，设置预读
   FileReader *log_reader = new FileReader(
     log_file, cct->_conf->bluefs_max_prefetch,
     false,  // !random
@@ -1222,6 +1223,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
     uint64_t read_pos = pos;
     bufferlist bl;
     {
+      // 读取一个 block
       int r = _read(log_reader, read_pos, super.block_size,
 		    &bl, NULL);
       if (r != (int)super.block_size && cct->_conf->bluefs_replay_recovery) {
@@ -1235,17 +1237,20 @@ int BlueFS::_replay(bool noop, bool to_stdout)
     uuid_d uuid;
     {
       auto p = bl.cbegin();
-      __u8 a, b;
+      __u8 a, b;	// 两个占位符，用于 ENCODE_START 中的 v 和 compact 占用
       uint32_t len;
       decode(a, p);
       decode(b, p);
-      decode(len, p);
-      decode(uuid, p);
-      decode(seq, p);
+      decode(len, p);	// 获取一个 transaction 长度
+      decode(uuid, p);	// 获取 uuid，用于校验与 superblock 中是否一致
+      decode(seq, p);	// 获取 logseq，用于校验 transaction 是否连续
+      // 判断 bl 是否包含一个完整的 transaction，如果需要后面会再读一个或多个 block 上来
+      // op_bl 后边有一个 4 字节的 crc 校验值和 2 字节的 ENCODE_FINISH 占位符
       if (len + 6 > bl.length()) {
 	more = round_up_to(len + 6 - bl.length(), super.block_size);
       }
     }
+    // 校验 uuid
     if (uuid != super.uuid) {
       if (seen_recs) {
 	dout(10) << __func__ << " 0x" << std::hex << pos << std::dec
@@ -1262,6 +1267,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
       }
       break;
     }
+    // 校验序列是否连续
     if (seq != log_seq + 1) {
       if (seen_recs) {
 	dout(10) << __func__ << " 0x" << std::hex << pos << std::dec
@@ -1274,6 +1280,8 @@ int BlueFS::_replay(bool noop, bool to_stdout)
       }
       break;
     }
+    // 如果事务不完整则再读 more（block 大小的整数倍）大小的数据上来
+    // 读成功之后当前的 transaction 完整，可以开始解析
     if (more) {
       dout(20) << __func__ << " need 0x" << std::hex << more << std::dec
                << " more bytes" << dendl;
@@ -1299,6 +1307,7 @@ int BlueFS::_replay(bool noop, bool to_stdout)
     bluefs_transaction_t t;
     try {
       auto p = bl.cbegin();
+      // seq 之后为 transaction
       decode(t, p);
       seen_recs = true;
     }
@@ -1326,11 +1335,14 @@ int BlueFS::_replay(bool noop, bool to_stdout)
                 << ": " << t << std::endl;
     }
 
+    // 一个 transaction 可以包含多个 op
+    // 遍历 transaction 的 op_bl
     auto p = t.op_bl.cbegin();
     auto pos0 = pos;
     while (!p.end()) {
       pos = pos0 + p.get_off();
       __u8 op;
+      // 解码 op，并根据 op 类型进行相应的事务处理
       decode(op, p);
       switch (op) {
 
@@ -2054,6 +2066,8 @@ void BlueFS::_drop_link_D(FileRef file)
     for (auto& r : file->fnode.extents) {
       dirty.pending_release[r.bdev].insert(r.offset, r.length);
     }
+    // 删除文件时已经不需要再同步文件元数据，所以将其从 dirty->files 中删除
+    // 并将文件的 dirty_seq 设置为 seq_stable，表示已同步
     if (file->dirty_seq > dirty.seq_stable) {
       // retract request to serialize changes
       ceph_assert(dirty.files.count(file->dirty_seq));
@@ -2196,32 +2210,47 @@ int64_t BlueFS::_read(
     outbl->clear();
 
   int64_t ret = 0;
+  // 加读锁
   std::shared_lock s_lock(h->lock);
   while (len > 0) {
     size_t left;
+    // buf 没有完全覆盖此次读取的范围，则需要到磁盘上读数据
     if (off < buf->bl_off || off >= buf->get_buf_end()) {
       s_lock.unlock();
       std::unique_lock u_lock(h->lock);
       buf->bl.reassign_to_mempool(mempool::mempool_bluefs_file_reader);
+      // 再判断一次是因为上边的锁是读锁，多个读者可以同时加锁，也就存在加锁这段时间
+      // 其他线程又读了一些数据，导致 buffer 发生变化
       if (off < buf->bl_off || off >= buf->get_buf_end()) {
         // if precondition hasn't changed during locking upgrade.
+	// 该操作会清空 bufferlist 的 ptr 链表
         buf->bl.clear();
+	// 将 buffer 的起始位置与 块大小 对齐
         buf->bl_off = off & super.block_mask();
         uint64_t x_off = 0;
+	// p 指向包含 offset 的 extent
+	// x_off 表示在 extent 内的偏移
         auto p = h->file->fnode.seek(buf->bl_off, &x_off);
+	// 读取位置超过文件大小
 	if (p == h->file->fnode.extents.end()) {
 	  dout(5) << __func__ << " reading less then required "
 		  << ret << "<" << ret + len << dendl;
 	  break;
 	}
 
+	// 将要读取的数据大小与 block size 对齐
         uint64_t want = round_up_to(len + (off & ~super.block_mask()),
 				    super.block_size);
+	// 去较大者，满足预读
         want = std::max(want, buf->max_prefetch);
+	// 取 extent 剩余大小和要读取大小的较小者，一次只读取一个 extent（extent 可能跨磁盘）
         uint64_t l = std::min(p->length - x_off, want);
-        //hard cap to 1GB
+        // hard cap to 1GB
+	// 最大单次读取 1GB
 	l = std::min(l, uint64_t(1) << 30);
+	// 获取文件结束位置的偏移
         uint64_t eof_offset = round_up_to(h->file->fnode.size, super.block_size);
+	// 如果没有设置忽略文件结尾，那么读取的大小不能超过文件结尾
         if (!h->ignore_eof &&
 	    buf->bl_off + l > eof_offset) {
 	  l = eof_offset - buf->bl_off;
@@ -2234,6 +2263,8 @@ int64_t BlueFS::_read(
 	// it makes it in sync with logic in _flush_range()
 	bool use_buffered_io = h->file->fnode.ino == 1 ? false : cct->_conf->bluefs_buffered_io;
 	if (!cct->_conf->bluefs_check_for_zeros) {
+	  // bdev_read 内部会创建 buffer，并挂载到 bufferlist 中
+	  // 返回后读取结束
 	  r = _bdev_read(p->bdev, p->offset + x_off, l, &buf->bl, ioc[p->bdev],
 			 use_buffered_io);
 	} else {
@@ -2251,10 +2282,12 @@ int64_t BlueFS::_read(
       // we should recheck if buffer is valid after lock downgrade
       continue; 
     }
+    // 获取剩余 buffer 中没包含的内容
     left = buf->get_buf_remaining(off);
     dout(20) << __func__ << " left 0x" << std::hex << left
              << " len 0x" << len << std::dec << dendl;
 
+    // 拷贝数据
     int64_t r = std::min(len, left);
     if (outbl) {
       bufferlist t;
@@ -2275,6 +2308,7 @@ int64_t BlueFS::_read(
     t.hexdump(*_dout);
     *_dout << dendl;
 
+    // 调整位置继续读取
     off += r;
     len -= r;
     ret += r;
@@ -2295,14 +2329,18 @@ void BlueFS::invalidate_cache(FileRef f, uint64_t offset, uint64_t length)
   dout(10) << __func__ << " file " << f->fnode
 	   << " 0x" << std::hex << offset << "~" << length << std::dec
            << dendl;
+  // 如果不是按照 block size 对齐则调整参数使其对齐
   if (offset & ~super.block_mask()) {
     offset &= super.block_mask();
     length = round_up_to(length, super.block_size);
   }
   uint64_t x_off = 0;
+  // 找到 offset~len 所在的 extent
   auto p = f->fnode.seek(offset, &x_off);
   while (length > 0 && p != f->fnode.extents.end()) {
     uint64_t x_len = std::min(p->length - x_off, length);
+    // 调用块设备接口使缓存无效
+    // 以 kerneldevice 为例，调用 posix 接口是缓存无效
     bdev[p->bdev]->invalidate_cache(p->offset + x_off, x_len);
     dout(20) << __func__  << " 0x" << std::hex << x_off << "~" << x_len
              << std:: dec << " of " << *p << dendl;
@@ -2732,17 +2770,17 @@ void BlueFS::_rewrite_log_and_layout_sync_LNF_LD(bool permit_dev_fallback,
  *
  * 6. Finalization. Clean up, old space release and total unlocking.
  *
- * 0. 锁定日志并禁止其扩展。前者只涉及下面程序的一部分，而后者则完全覆盖了整个程序
- * 1. 分配一个新的范围以继续记录日志，然后记录一个事件标签，将日志写入位置跳转到新的范围。
- *    此时，旧的范围将不会被写入，并将所有内容压缩。新事件将被写入我们保留的新区域。
- *    后者最终将在压缩完成后成为新的日志尾部
- * 2. 创建新日志。它将包括日志的起始部分、压缩后的元数据正文和上述尾部。
- *    附加到起始部分和元数据正文的跳转操作将把这些部分连接起来。
- *    日志锁会在进程中释放，以允许并行访问日志
- * 3. 写入新的日志内容
- * 4. 写入新的超级块，以反映所有更改
- * 5. 应用新日志 fnode，日志被锁定一段时间
- * 6. 最终完成，清理、释放旧空间并完全解锁
+ * 0. 加日志锁并禁止日志扩展
+ * 1. 分配一个新的空间用于压缩过程中的外部写入，旧日志追加一个 JUMP op 指向新位置以保持旧日志不变；
+ *    将所有元数据封装为一个新的事务，并根据事务的大小申请一个空间，插入到上述空间前部，充当以前的旧日志；
+ * 2. 创建新日志。
+ *    分配一个起始空间，包含一个初始化事务和日志 inc 事务；
+ *    追加一个 JUMP 事务，跳转到新的元数据的起始位置；
+ *    再在新的元数据的结尾处追加一个 JUMP 事务，跳转到持续写入的日志位置
+ * 3. 将所有内容封装成 buffer，写磁盘
+ * 4. 更新超级快，以对应新 log 的元数据
+ * 5. 应用新的 log
+ * 6. 清理、释放旧空间并完全解锁
  */
 
 void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
@@ -2756,6 +2794,7 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
   // Lock the log and forbid its expansion and other compactions
 
   // only one compaction allowed at one time
+  // 如果已经在 compact 则直接退出
   bool old_is_comp = std::atomic_exchange(&log_is_compacting, true);
   if (old_is_comp) {
     dout(10) << __func__ << " ongoing" <<dendl;
@@ -2774,6 +2813,7 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
   // We need to sync log, because we are injecting discontinuity, and writer is not prepared for that.
 
   //signal _maybe_extend_log that expansion of log is temporary inacceptable
+  // 禁止扩展
   bool old_forbidden = atomic_exchange(&log_forbidden_to_expand, true);
   ceph_assert(old_forbidden == false);
 
@@ -2813,6 +2853,7 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
   log.t.op_file_update_inc(log_file->fnode);
 
   // 1.4 jump to new position should mean next seq
+  // 跳转到旧 log 分配的结尾位置
   log.t.op_jump(log.seq_live + 1, old_log_jump_to);
   uint64_t seq_now = log.seq_live;
   // we need to flush all bdev because we will be streaming all dirty files to log
@@ -2855,11 +2896,12 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
 
   // now state is captured to compacted_meta_t,
   // current log can be used to write to,
-  //ops in log will be continuation of captured state
+  // ops in log will be continuation of captured state
   logger->tinc(l_bluefs_compaction_lock_lat, mono_clock::now() - t0);
   log.lock.unlock();
 
   // 2.2 Allocate the space required for the compacted meta transaction
+  // 执行完成后有两段空间，第一段用于存储所有的日志元数据，第二段在第一步中申请用于存储新的 log 写入
   uint64_t compacted_meta_need = _estimate_transaction_size(&compacted_meta_t);
   dout(20) << __func__ << " compacted_meta_need " << compacted_meta_need
            << dendl;
@@ -2880,6 +2922,7 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
 
   // 2.3 Allocate the space required for the starter part of the new log.
   // Start building New log fnode
+  // 申请一段空间，用于记录日志的初始事务
   FileRef new_log = nullptr;
   new_log = ceph::make_ref<File>();
   new_log->fnode.ino = log_file->fnode.ino;
@@ -2905,6 +2948,8 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
   new_log->fnode.claim_extents(fnode_tail.extents);
 
   // 2.6 Encode new log fnode
+  // 创建初始事务的并编码到 starter_bl 中
+  // 里边包含第一个 JUMP 事务，从第一段跳到第二段
   bufferlist starter_bl;
   _make_initial_transaction(starter_seq, new_log->fnode, starter_need,
     &starter_bl);
@@ -2917,6 +2962,7 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
   // Extent compacted_meta transaction with a just to new log tail.
   // Hopefully "compact_meta_need" estimation provides enough extra space
   // for this new jump, assert below if not
+  // 第二个 JUMP 事务，从第二段跳转到第三段
   compacted_meta_t.op_jump(seq_now, starter_need + compacted_meta_need);
   // Now do encodeing and padding
   bufferlist compacted_meta_bl;
@@ -2930,6 +2976,7 @@ void BlueFS::_compact_log_async_LD_LNF_D() //also locks FW for new_writer
   // Write out new log's content
   // 3.1 Stage new log's content writing
   // 3.2 Do flush and wait for completion through flush_bdev()
+  // 写文件
   //
 
   // 3.1 Stage new log's content writing
@@ -3053,6 +3100,7 @@ void BlueFS::_consume_dirty(uint64_t seq)
   auto lsi = dirty.files.find(seq);
   if (lsi != dirty.files.end()) {
     dout(20) << __func__ << " " << lsi->second.size() << " dirty.files" << dendl;
+    // 为所有 dirty 的 file 创建事务
     for (auto &f : lsi->second) {
       // fnode here is protected indirectly
       // the only path that adds to dirty.files goes from _fsync()
@@ -3073,6 +3121,7 @@ int64_t BlueFS::_maybe_extend_log()
   // BTW: this triggers `flush()` in the `page_aligned_appender` of `log.writer`.
   int64_t runway = log.writer->file->fnode.get_allocated() -
     log.writer->get_effective_write_pos();
+  // 如果可用空间小于指定的最小空间（默认 1M）则分配 log 文件的空间
   if (runway < (int64_t)cct->_conf->bluefs_min_log_runway) {
     dout(10) << __func__ << " allocating more log runway (0x"
 	     << std::hex << runway << std::dec  << " remaining)" << dendl;
@@ -3090,6 +3139,8 @@ int64_t BlueFS::_maybe_extend_log()
      * - stall extending log until we finish compacting and switch log (CURRENT)
      * - re-run compaction with more runway for old log
      * - add OP_FILE_ADDEXT that adds extent; will be compatible with both logs
+     *
+     * 正在进行日志压缩，暂停扩展空间
      */
     if (log_forbidden_to_expand.load() == true) {
       return -EWOULDBLOCK;
@@ -3113,6 +3164,7 @@ void BlueFS::_flush_and_sync_log_core(int64_t runway)
   dout(10) << __func__ << " " << log.t << dendl;
 
   bufferlist bl;
+  // 预留 super block 的空间
   bl.reserve(super.block_size);
   encode(log.t, bl);
   // pad to block boundary
@@ -3128,12 +3180,14 @@ void BlueFS::_flush_and_sync_log_core(int64_t runway)
                                         // transaction will not fit extents before growth -> data loss on _replay
   }
 
+  // 将 buffer 追加到 bufferlist 中
   log.writer->append(bl);
 
   // prepare log for new transactions
   log.t.clear();
   log.t.seq = log.seq_live;
 
+  // 下刷指定文件的数据
   uint64_t new_data = _flush_special(log.writer);
   vselector->add_usage(log.writer->file->vselector_hint, new_data);
 }
@@ -3149,6 +3203,7 @@ void BlueFS::_clear_dirty_set_stable_D(uint64_t seq)
     dout(20) << __func__ << " seq_stable " << dirty.seq_stable << dendl;
 
     // undirty all files that were already streamed to log
+    // 清空所有已经写盘的 dirty file 信息
     auto p = dirty.files.begin();
     while (p != dirty.files.end()) {
       if (p->first > dirty.seq_stable) {
@@ -3161,11 +3216,14 @@ void BlueFS::_clear_dirty_set_stable_D(uint64_t seq)
         File *file = &*l;
         ceph_assert(file->dirty_seq <= dirty.seq_stable);
         dout(20) << __func__ << " cleaned file " << file->fnode.ino << dendl;
+	// 更新所有文件的 dirty 序列
         file->dirty_seq = dirty.seq_stable;
+	// 将文件从 dirty 序列中删除
         p->second.erase(l++);
       }
 
       ceph_assert(p->second.empty());
+      // 本序列更新完将序列删除
       dirty.files.erase(p++);
     }
   } else {
@@ -3181,6 +3239,7 @@ void BlueFS::_release_pending_allocations(vector<interval_set<uint64_t>>& to_rel
     if (!to_release[i].empty()) {
       /* OK, now we have the guarantee alloc[i] won't be null. */
       int r = 0;
+      // 调用磁盘的 discard 接口回收空间
       if (cct->_conf->bdev_enable_discard && cct->_conf->bdev_async_discard) {
 	r = bdev[i]->queue_discard(to_release[i]);
 	if (r == 0)
@@ -3190,6 +3249,7 @@ void BlueFS::_release_pending_allocations(vector<interval_set<uint64_t>>& to_rel
 	  bdev[i]->discard(p.get_start(), p.get_len());
 	}
       }
+      // 调用分配器的接口回收空间
       alloc[i]->release(to_release[i]);
       if (is_shared_alloc(i)) {
         shared_alloc->bluefs_used -= to_release[i].size();
@@ -3204,6 +3264,7 @@ int BlueFS::_flush_and_sync_log_LD(uint64_t want_seq)
   do {
     log.lock.lock();
     dirty.lock.lock();
+    // 想要同步的序列已经被同步过了
     if (want_seq && want_seq <= dirty.seq_stable) {
       dout(10) << __func__ << " want_seq " << want_seq << " <= seq_stable "
 	       << dirty.seq_stable << ", done" << dendl;
@@ -3212,12 +3273,15 @@ int BlueFS::_flush_and_sync_log_LD(uint64_t want_seq)
       return 0;
     }
 
+    // 尝试给 log 分配空间
+    // 如果返回 -EWOULDBLOCK 表示正在进行日志压缩暂停分配
     available_runway = _maybe_extend_log();
     if (available_runway == -EWOULDBLOCK) {
       // we are in need of adding runway, but we are during log-switch from compaction
       dirty.lock.unlock();
       //instead log.lock.unlock() do move ownership
       std::unique_lock<ceph::mutex> ll(log.lock, std::adopt_lock);
+      // 进入条件变量等待
       while (log_forbidden_to_expand.load()) {
 	log_cond.wait(ll);
       }
@@ -3225,21 +3289,26 @@ int BlueFS::_flush_and_sync_log_LD(uint64_t want_seq)
       ceph_assert(available_runway >= 0);
     }
   } while (available_runway < 0);
-  
+
   ceph_assert(want_seq == 0 || want_seq <= dirty.seq_live); // illegal to request seq that was not created yet
-  uint64_t seq =_log_advance_seq();
-  _consume_dirty(seq);
+  uint64_t seq =_log_advance_seq(); // 底层 dirty 序列
+  _consume_dirty(seq); // 为所有小于 log dirty 序列的文件创建事务并记录到 log 中
+  // 将待释放的 extent 保存到 to_release 中
   vector<interval_set<uint64_t>> to_release(dirty.pending_release.size());
   to_release.swap(dirty.pending_release);
   dirty.lock.unlock();
 
+  // 将 log 数据追加到 log.writer 中并提交
   _flush_and_sync_log_core(available_runway);
+  // 等待 IO 完成
   _flush_bdev(log.writer);
   logger->set(l_bluefs_log_bytes, log.writer->file->fnode.size);
   //now log.lock is no longer needed
   log.lock.unlock();
 
+  // 更新 dirty
   _clear_dirty_set_stable_D(seq);
+  // 释放 extent
   _release_pending_allocations(to_release);
 
   _update_logger_stats();
@@ -3280,6 +3349,10 @@ int BlueFS::_flush_and_sync_log_jump_D(uint64_t jump_to,
   return 0;
 }
 
+/**
+ * partial 表示是否有小尾巴
+ * length 是本次下刷数据的大小 + 小尾巴
+ */
 ceph::bufferlist BlueFS::FileWriter::flush_buffer(
   CephContext* const cct,
   const bool partial,
@@ -3288,15 +3361,22 @@ ceph::bufferlist BlueFS::FileWriter::flush_buffer(
 {
   ceph_assert(ceph_mutex_is_locked(this->lock) || file->fnode.ino <= 1);
   ceph::bufferlist bl;
+  // 如果上次下刷数据的结尾部分未按照 4K 对齐，会剩余一个小尾巴保存在 tail_block 中
+  // 本次下刷将小尾巴与合并过来
   if (partial) {
     tail_block.splice(0, tail_block.length(), &bl);
   }
+  // 计算本次写入的数据的大小
   const auto remaining_len = length - bl.length();
+  // 将本次写入的数据合并到 bl 中
   buffer.splice(0, remaining_len, &bl);
+  // 如果本次写入的数据结尾也不是 4K 对齐，那么也会剩余一个小尾巴
   if (buffer.length()) {
     dout(20) << " leaving 0x" << std::hex << buffer.length() << std::dec
              << " unflushed" << dendl;
   }
+  // 判断本次写入 + 上次遗留的结尾是否 block size 对齐
+  // 不对齐的部分需要补 0
   if (const unsigned tail = bl.length() & ~super.block_mask(); tail) {
     const auto padding_len = super.block_size - tail;
     dout(20) << __func__ << " caching tail of 0x"
@@ -3307,7 +3387,9 @@ ceph::bufferlist BlueFS::FileWriter::flush_buffer(
     // We need to go through the `buffer_appender` to get a chance to
     // preserve in-memory contiguity and not mess with the alignment.
     // Otherwise a costly rebuild could happen in e.g. `KernelDevice`.
+    // 补 0
     buffer_appender.append_zero(padding_len);
+    // 补 0 部分合入到 bl 中
     buffer.splice(buffer.length() - padding_len, padding_len, &bl);
     // Deep copy the tail here. This allows to avoid costlier copy on
     // bufferlist rebuild in e.g. `KernelDevice` and minimizes number
@@ -3334,12 +3416,17 @@ int BlueFS::_signal_dirty_to_log_D(FileWriter *h)
 
   h->file->fnode.mtime = ceph_clock_now();
   ceph_assert(h->file->fnode.ino >= 1);
+  // dirty_seq <= seq_stable 说明该文件之前已经在 dirty 序列中同步过元数据了
+  // 由于本次有新的更新，所以将其设置为下一更新序列，本次更新并不需要移除之前的序列，
+  // 因为同步元数据的时候 dirty 的 seq_stable 已经被删除了
   if (h->file->dirty_seq <= dirty.seq_stable) {
     h->file->dirty_seq = dirty.seq_live;
     dirty.files[h->file->dirty_seq].push_back(*h->file);
     dout(20) << __func__ << " dirty_seq = " << dirty.seq_live
 	     << " (was clean)" << dendl;
   } else {
+    // seq_live = seq_stable + 1
+    // 如果 dirty_seq 不等于当前的 seq_live，说明太大了有异常，进行 re-dirty
     if (h->file->dirty_seq != dirty.seq_live) {
       // need re-dirty, erase from list first
       ceph_assert(dirty.files.count(h->file->dirty_seq));
@@ -3380,8 +3467,11 @@ int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length)
 
   bool buffered = cct->_conf->bluefs_buffered_io;
 
+  // 表明数据已经下刷
   if (offset + length <= h->pos)
     return 0;
+
+  // 从文件位置指针开始下刷
   if (offset < h->pos) {
     length -= h->pos - offset;
     offset = h->pos;
@@ -3389,13 +3479,17 @@ int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length)
              << std::hex << offset << "~" << length << std::dec
              << dendl;
   }
+
+  // 要对文件进行操作，会改变文件元数据，因此加锁
   std::lock_guard file_lock(h->file->lock);
   ceph_assert(offset <= h->file->fnode.size);
 
   uint64_t allocated = h->file->fnode.get_allocated();
+  // 先减去卷选择器中该文件的大小，后边会按照操作后的值重新加回来
   vselector->sub_usage(h->file->vselector_hint, h->file->fnode);
   // do not bother to dirty the file if we are overwriting
   // previously allocated extents.
+  // 如果已分配空间不满足本次下刷的大小，则分配空间
   if (allocated < offset + length) {
     // we should never run out of log space here; see the min runway check
     // in _flush_and_sync_log.
@@ -3411,8 +3505,11 @@ int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length)
       ceph_abort_msg("bluefs enospc");
       return r;
     }
+    // 表明文件元数据有变化需要写 log
     h->file->is_dirty = true;
   }
+
+  // 修改文件大小
   if (h->file->fnode.size < offset + length) {
     h->file->fnode.size = offset + length;
     h->file->is_dirty = true;
@@ -3424,18 +3521,26 @@ int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length)
   return res;
 }
 
+/**
+ * 仅提交数据，并未等待 IO 完成
+ */
 int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length, bool buffered)
 {
   if (h->file->fnode.ino > 1) {
     ceph_assert(ceph_mutex_is_locked(h->lock));
     ceph_assert(ceph_mutex_is_locked(h->file->lock));
   }
+  // x_off 表示 offset 在 extent 内的偏移
   uint64_t x_off = 0;
+  // 超找对应 extent
   auto p = h->file->fnode.seek(offset, &x_off);
   ceph_assert(p != h->file->fnode.extents.end());
   dout(20) << __func__ << " in " << *p << " x_off 0x"
            << std::hex << x_off << std::dec << dendl;
 
+  // partital 不为 0 表示本次刷新的其实位置不是 block size 对齐的
+  // 上次下刷数据时结尾部分也不是 4K 对齐的，留了个小尾巴
+  // 调整 offset 等信息使其按照 block size 对齐
   unsigned partial = x_off & ~super.block_mask();
   if (partial) {
     dout(20) << __func__ << " using partial tail 0x"
@@ -3444,6 +3549,7 @@ int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length, bool bu
     offset -= partial;
     length += partial;
     dout(20) << __func__ << " waiting for previous aio to complete" << dendl;
+    // 等待所有磁盘的 IO 全部结束
     for (auto p : h->iocv) {
       if (p) {
 	p->aio_wait();
@@ -3451,8 +3557,12 @@ int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length, bool bu
     }
   }
 
+  // 调整 buffer，主要处理开头和结尾处不是 block size 对齐的部分
+  // 起始位置不对齐将上次写的 tail block 插入进来
+  // 结尾位置不对齐补 0
   auto bl = h->flush_buffer(cct, partial, length, super);
   ceph_assert(bl.length() >= length);
+  // 调整文件位置指针
   h->pos = offset + length;
   length = bl.length();
 
@@ -3482,6 +3592,7 @@ int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length, bool bu
     uint64_t x_len = std::min(p->length - x_off, length);
     bufferlist t;
     t.substr_of(bl, bloff, x_len);
+    // 调用 block 接口写数据，只是准备好 IO 上下文
     if (cct->_conf->bluefs_sync_write) {
       bdev[p->bdev]->write(p->offset + x_off, t, buffered, h->write_hint);
     } else {
@@ -3500,6 +3611,7 @@ int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length, bool bu
   if (bytes_written_slow) {
     logger->inc(l_bluefs_bytes_written_slow, bytes_written_slow);
   }
+  // 调用 submit 提交 IO 上下文
   for (unsigned i = 0; i < MAX_BDEV; ++i) {
     if (bdev[i]) {
       if (h->iocv[i] && h->iocv[i]->has_pending_aios()) {
@@ -3542,22 +3654,32 @@ void BlueFS::_wait_for_aio(FileWriter *h)
 }
 #endif
 
+/**
+ * 接口本身不强制数据落盘，如果新写入的数据量较小（未超过 512K）是直接返回不调用下刷接口的
+ */
 void BlueFS::append_try_flush(FileWriter *h, const char* buf, size_t len)/*_WF_LNF_NF_LD_D*/
 {
   bool flushed_sum = false;
   {
+    // 句柄加锁
     std::unique_lock hl(h->lock);
+    // bufferlist 最大数据量为 1GB
     size_t max_size = 1ull << 30; // cap to 1GB
     while (len > 0) {
       bool need_flush = true;
+      // 获取当前 bufferlist 的长度
       auto l0 = h->get_buffer_length();
+      // 如果当前 buffer 中的数据大小小于 1GB 则继续向 bufferlist 中添加
       if (l0 < max_size) {
 	size_t l = std::min(len, max_size - l0);
+	// 内部会创建 ptr 指向对应的 buffer 内存
 	h->append(buf, l);
 	buf += l;
 	len -= l;
+	// buffer 中的数据超过最小刷新大小（默认 512K），则下刷数据
 	need_flush = h->get_buffer_length() >= cct->_conf->bluefs_min_flush_size;
       }
+      // 如果需要刷新数据则调用 flush 接口下刷
       if (need_flush) {
 	bool flushed = false;
 	int r = _flush_F(h, true, &flushed);
@@ -3579,6 +3701,7 @@ void BlueFS::flush(FileWriter *h, bool force)/*_WF_LNF_NF_LD_D*/
   bool flushed = false;
   int r;
   {
+    // 给句柄加锁
     std::unique_lock hl(h->lock);
     r = _flush_F(h, force, &flushed);
     ceph_assert(r == 0);
@@ -3590,12 +3713,17 @@ void BlueFS::flush(FileWriter *h, bool force)/*_WF_LNF_NF_LD_D*/
 
 int BlueFS::_flush_F(FileWriter *h, bool force, bool *flushed)
 {
+  // 只有在加锁的情况下才能执行下刷操作（append 时会给句柄加锁保证写、下刷两个动作互斥）
   ceph_assert(ceph_mutex_is_locked(h->lock));
+  // 获取要下刷的数据大小
   uint64_t length = h->get_buffer_length();
+  // 获取文件位置指针
   uint64_t offset = h->pos;
   if (flushed) {
     *flushed = false;
   }
+  // 未指定强制刷新且数据量未超过最小下刷大小的时候直接返回
+  // 因此上层业务要保证数据落盘需要指定 force 为 true
   if (!force &&
       length < cct->_conf->bluefs_min_flush_size) {
     dout(10) << __func__ << " " << h << " ignoring, length " << length
@@ -3603,6 +3731,7 @@ int BlueFS::_flush_F(FileWriter *h, bool force, bool *flushed)
 	     << dendl;
     return 0;
   }
+  // buffer 中没有数据直接返回
   if (length == 0) {
     dout(10) << __func__ << " " << h << " no dirty data on "
 	     << h->file->fnode << dendl;
@@ -3612,6 +3741,7 @@ int BlueFS::_flush_F(FileWriter *h, bool force, bool *flushed)
            << std::hex << offset << "~" << length << std::dec
 	   << " to " << h->file->fnode << dendl;
   ceph_assert(h->pos <= h->file->fnode.size);
+  // 下刷指定范围的数据
   int r = _flush_range_F(h, offset, length);
   if (flushed) {
     *flushed = true;
@@ -3645,6 +3775,7 @@ int BlueFS::truncate(FileWriter *h, uint64_t offset)/*_WF_L*/
   std::lock_guard hl(h->lock);
   dout(10) << __func__ << " 0x" << std::hex << offset << std::dec
            << " file " << h->file->fnode << dendl;
+  // 文件删除时会释放所有空间，此时直接返回
   if (h->file->deleted) {
     dout(10) << __func__ << "  deleted, no-op" << dendl;
     return 0;
@@ -3654,24 +3785,29 @@ int BlueFS::truncate(FileWriter *h, uint64_t offset)/*_WF_L*/
   ceph_assert(h->file->fnode.ino > 1);
 
   // truncate off unflushed data?
+  // 回收还没有下刷的数据区域
   if (h->pos < offset &&
       h->pos + h->get_buffer_length() > offset) {
     dout(20) << __func__ << " tossing out last " << offset - h->pos
 	     << " unflushed bytes" << dendl;
     ceph_abort_msg("actually this shouldn't happen");
   }
+  // 如果文件有未刷新数据，则等待数据刷新
   if (h->get_buffer_length()) {
     int r = _flush_F(h, true);
     if (r < 0)
       return r;
   }
+  // offset 指向文件结尾则直接返回
   if (offset == h->file->fnode.size) {
     return 0;  // no-op!
   }
+  // offset 大于文件则直接报错
   if (offset > h->file->fnode.size) {
     ceph_abort_msg("truncate up not supported");
   }
   ceph_assert(h->file->fnode.size >= offset);
+  // 刷新磁盘数据
   _flush_bdev(h);
 
   std::lock_guard ll(log.lock);
@@ -3679,6 +3815,7 @@ int BlueFS::truncate(FileWriter *h, uint64_t offset)/*_WF_L*/
   h->file->fnode.size = offset;
   h->file->is_dirty = true;
   vselector->add_usage(h->file->vselector_hint, h->file->fnode.size);
+  // 在事务中重置 extents
   log.t.op_file_update_inc(h->file->fnode);
   return 0;
 }
@@ -3691,10 +3828,13 @@ int BlueFS::fsync(FileWriter *h)/*_WF_WD_WLD_WLNF_WNF*/
   {
     dout(10) << __func__ << " " << h << " " << h->file->fnode
              << " dirty " << h->file->is_dirty << dendl;
+    // 提交数据
     int r = _flush_F(h, true);
     if (r < 0)
       return r;
+    // 等待 IO 完成并下刷数据使其落盘
     _flush_bdev(h);
+    // 如果文件元数据有变化将其添加到 dirty 中等待写日志
     if (h->file->is_dirty) {
       _signal_dirty_to_log_D(h);
       h->file->is_dirty = false;
@@ -3708,6 +3848,8 @@ int BlueFS::fsync(FileWriter *h)/*_WF_WD_WLD_WLNF_WNF*/
       }
     }
   }
+  // 如果 seq_stable 小于 dirty_seq 表明该文件还没有被同步过元数据
+  // 所以调用 _flush_and_sync_log_LD 同步文件所在的 dirty 序列的所有文件
   if (old_dirty_seq) {
     _flush_and_sync_log_LD(old_dirty_seq);
   }
@@ -3728,6 +3870,7 @@ void BlueFS::_flush_bdev(FileWriter *h, bool check_mutext_locked)
   }
   std::array<bool, MAX_BDEV> flush_devs = h->dirty_devs;
   h->dirty_devs.fill(false);
+  // 等待 IO 完成
 #ifdef HAVE_LIBAIO
   if (!cct->_conf->bluefs_sync_write) {
     list<aio_t> completed_ios;
@@ -3739,6 +3882,9 @@ void BlueFS::_flush_bdev(FileWriter *h, bool check_mutext_locked)
   _flush_bdev(flush_devs);
 }
 
+/**
+ * 遍历所有磁盘，调用文件系统接口下刷数据使其落盘
+ */
 void BlueFS::_flush_bdev(std::array<bool, MAX_BDEV>& dirty_bdevs)
 {
   // NOTE: this is safe to call without a lock.
@@ -3909,6 +4055,7 @@ int BlueFS::preallocate(FileRef f, uint64_t off, uint64_t len)/*_LF*/
     uint64_t want = off + len - allocated;
 
     vselector->sub_usage(f->vselector_hint, f->fnode);
+    // 分配空间
     int r = _allocate(vselector->select_prefer_bdev(f->vselector_hint),
       want,
       0,
@@ -3916,7 +4063,7 @@ int BlueFS::preallocate(FileRef f, uint64_t off, uint64_t len)/*_LF*/
     vselector->add_usage(f->vselector_hint, f->fnode);
     if (r < 0)
       return r;
-
+    // 更新事务
     log.t.op_file_update_inc(f->fnode);
   }
   return 0;
@@ -3937,6 +4084,7 @@ void BlueFS::sync_metadata(bool avoid_compact)/*_LNF_NF_LD_D*/
     lgeneric_subdout(cct, bluefs, 10) << __func__;
     start = ceph_clock_now();
     *_dout <<  dendl;
+    // 等待 IO 落盘并同步元数据
     _flush_bdev(); // FIXME?
     _flush_and_sync_log_LD();
     dout(10) << __func__ << " done in " << (ceph_clock_now() - start) << dendl;
@@ -3976,6 +4124,7 @@ int BlueFS::open_for_write(
   std::lock_guard ll(log.lock);
   std::lock_guard nl(nodes.lock);
   dout(10) << __func__ << " " << dirname << "/" << filename << dendl;
+  // 目录不存在则报错
   map<string,DirRef>::iterator p = nodes.dir_map.find(dirname);
   DirRef dir;
   if (p == nodes.dir_map.end()) {
@@ -3989,6 +4138,7 @@ int BlueFS::open_for_write(
 
   map<string,FileRef>::iterator q = dir->file_map.find(filename);
   if (q == dir->file_map.end()) {
+    // 文件不存在且声明是覆盖写，则报错，否则创建
     if (overwrite) {
       dout(20) << __func__ << " dir " << dirname << " (" << dir
 	       << ") file " << filename
@@ -4010,6 +4160,7 @@ int BlueFS::open_for_write(
 	       << ") file " << filename
 	       << " already exists, overwrite in place" << dendl;
     } else {
+      // 如果文件存在但不是覆盖写，则回收文件的所有空间
       dout(20) << __func__ << " dir " << dirname << " (" << dir
 	       << ") file " << filename
 	       << " already exists, truncate + overwrite" << dendl;
@@ -4033,10 +4184,13 @@ int BlueFS::open_for_write(
 	   << " vsel_hint " << file->vselector_hint
 	   << dendl;
 
+  // 记录文件更新日志
   log.t.op_file_update(file->fnode);
+  // 如果是新建文件记录文件与目录的链接日志
   if (create)
     log.t.op_dir_link(dirname, filename, file->fnode.ino);
 
+  // 释放旧空间
   std::lock_guard dl(dirty.lock);
   for (auto& p : pending_release_extents) {
     dirty.pending_release[p.bdev].insert(p.offset, p.length);
@@ -4062,7 +4216,9 @@ int BlueFS::open_for_write(
 
 BlueFS::FileWriter *BlueFS::_create_writer(FileRef f)
 {
+  // 创建写句柄
   FileWriter *w = new FileWriter(f);
+  // 创建写 IO 上下文
   for (unsigned i = 0; i < MAX_BDEV; ++i) {
     if (bdev[i]) {
       w->iocv[i] = new IOContext(cct, NULL);
@@ -4071,6 +4227,7 @@ BlueFS::FileWriter *BlueFS::_create_writer(FileRef f)
   return w;
 }
 
+// 等待 IO 结束
 void BlueFS::_drain_writer(FileWriter *h)
 {
   dout(10) << __func__ << " " << h << " type " << h->writer_type << dendl;
@@ -4125,6 +4282,7 @@ int BlueFS::open_for_read(
   std::lock_guard nl(nodes.lock);
   dout(10) << __func__ << " " << dirname << "/" << filename
 	   << (random ? " (random)":" (sequential)") << dendl;
+  // 目录不存在则报错
   map<string,DirRef>::iterator p = nodes.dir_map.find(dirname);
   if (p == nodes.dir_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " not found" << dendl;
@@ -4132,6 +4290,7 @@ int BlueFS::open_for_read(
   }
   DirRef dir = p->second;
 
+  // 文件不存在则报错
   map<string,FileRef>::iterator q = dir->file_map.find(filename);
   if (q == dir->file_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " (" << dir
@@ -4141,6 +4300,7 @@ int BlueFS::open_for_read(
   }
   File *file = q->second.get();
 
+  // 如果是随机读方式，预读大小设置为 4096，否则设置为 bluefs_max_prefetch（默认 1M）
   *h = new FileReader(file, random ? 4096 : cct->_conf->bluefs_max_prefetch,
 		      random, false);
   dout(10) << __func__ << " h " << *h << " on " << file->fnode << dendl;
@@ -4155,11 +4315,14 @@ int BlueFS::rename(
   std::lock_guard nl(nodes.lock);
   dout(10) << __func__ << " " << old_dirname << "/" << old_filename
 	   << " -> " << new_dirname << "/" << new_filename << dendl;
+
+  // 先找到旧的目录
   map<string,DirRef>::iterator p = nodes.dir_map.find(old_dirname);
   if (p == nodes.dir_map.end()) {
     dout(20) << __func__ << " dir " << old_dirname << " not found" << dendl;
     return -ENOENT;
   }
+  // 根据旧的目录超找其下旧的文件名
   DirRef old_dir = p->second;
   map<string,FileRef>::iterator q = old_dir->file_map.find(old_filename);
   if (q == old_dir->file_map.end()) {
@@ -4169,12 +4332,13 @@ int BlueFS::rename(
     return -ENOENT;
   }
   FileRef file = q->second;
-
+  // 查找新目录，找不到报错
   p = nodes.dir_map.find(new_dirname);
   if (p == nodes.dir_map.end()) {
     dout(20) << __func__ << " dir " << new_dirname << " not found" << dendl;
     return -ENOENT;
   }
+  // 查找新目录下的新文件名，如果存在则删除
   DirRef new_dir = p->second;
   q = new_dir->file_map.find(new_filename);
   if (q != new_dir->file_map.end()) {
@@ -4189,9 +4353,12 @@ int BlueFS::rename(
   dout(10) << __func__ << " " << new_dirname << "/" << new_filename << " "
 	   << " " << file->fnode << dendl;
 
+  // 将新文件挂载到新目录下
   new_dir->file_map[string{new_filename}] = file;
+  // 移除旧目录
   old_dir->file_map.erase(string{old_filename});
 
+  // 记录 log 日志
   log.t.op_dir_link(new_dirname, new_filename, file->fnode.ino);
   log.t.op_dir_unlink(old_dirname, old_filename);
   return 0;
@@ -4202,11 +4369,13 @@ int BlueFS::mkdir(std::string_view dirname)/*_LN*/
   std::lock_guard ll(log.lock);
   std::lock_guard nl(nodes.lock);
   dout(10) << __func__ << " " << dirname << dendl;
+  // 先检查目录是否存在，如存在则报错
   map<string,DirRef>::iterator p = nodes.dir_map.find(dirname);
   if (p != nodes.dir_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " exists" << dendl;
     return -EEXIST;
   }
+  // 生成新的目录并记录日志
   nodes.dir_map[string{dirname}] = ceph::make_ref<Dir>();
   log.t.op_dir_create(dirname);
   return 0;
@@ -4217,6 +4386,7 @@ int BlueFS::rmdir(std::string_view dirname)/*_LN*/
   std::lock_guard ll(log.lock);
   std::lock_guard nl(nodes.lock);
   dout(10) << __func__ << " " << dirname << dendl;
+  // 先检查目录是否存在，如不存在则报错
   auto p = nodes.dir_map.find(dirname);
   if (p == nodes.dir_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " does not exist" << dendl;
@@ -4227,6 +4397,7 @@ int BlueFS::rmdir(std::string_view dirname)/*_LN*/
     dout(20) << __func__ << " dir " << dirname << " not empty" << dendl;
     return -ENOTEMPTY;
   }
+  // 删除目录并记录日志
   nodes.dir_map.erase(string{dirname});
   log.t.op_dir_remove(dirname);
   return 0;
@@ -4275,6 +4446,7 @@ int BlueFS::lock_file(std::string_view dirname, std::string_view filename,
   std::lock_guard ll(log.lock);
   std::lock_guard nl(nodes.lock);
   dout(10) << __func__ << " " << dirname << "/" << filename << dendl;
+  // 目录不存在则报错
   map<string,DirRef>::iterator p = nodes.dir_map.find(dirname);
   if (p == nodes.dir_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " not found" << dendl;
@@ -4283,6 +4455,7 @@ int BlueFS::lock_file(std::string_view dirname, std::string_view filename,
   DirRef dir = p->second;
   auto q = dir->file_map.find(filename);
   FileRef file;
+  // 文件不存在则创建
   if (q == dir->file_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " (" << dir
 	     << ") file " << filename
@@ -4303,6 +4476,7 @@ int BlueFS::lock_file(std::string_view dirname, std::string_view filename,
       return -ENOLCK;
     }
   }
+  // 将标记设置为 true，并返回文件锁对象
   file->locked = true;
   *plock = new FileLock(file);
   dout(10) << __func__ << " locked " << file->fnode
@@ -4315,6 +4489,7 @@ int BlueFS::unlock_file(FileLock *fl)/*_N*/
   std::lock_guard nl(nodes.lock);
   dout(10) << __func__ << " " << fl << " on " << fl->file->fnode << dendl;
   ceph_assert(fl->file->locked);
+  // 解锁并删除文件锁对象
   fl->file->locked = false;
   delete fl;
   return 0;
@@ -4380,9 +4555,9 @@ int BlueFS::unlink(std::string_view dirname, std::string_view filename)/*_LND*/
              << " is locked" << dendl;
     return -EBUSY;
   }
-  dir->file_map.erase(string{filename});
-  log.t.op_dir_unlink(dirname, filename);
-  _drop_link_D(file);
+  dir->file_map.erase(string{filename});	// 删除目录下文件的引用
+  log.t.op_dir_unlink(dirname, filename);	// 记录接触引用的日志
+  _drop_link_D(file);				// 释放文件占用的磁盘空间
   return 0;
 }
 
