@@ -65,13 +65,19 @@ BitmapFreelistManager::BitmapFreelistManager(CephContext* cct,
 {
 }
 
+/**
+ * new_size - 磁盘大小
+ * granularity - 磁盘粒度，即 block size，或 bytes_per_block
+ * zone_size - SMR 盘的 zone 大小
+ * first_sequential_zone - SMR 第一个 SMR 区位置
+ */
 int BitmapFreelistManager::create(uint64_t new_size, uint64_t granularity,
 				  uint64_t zone_size, uint64_t first_sequential_zone,
 				  KeyValueDB::Transaction txn)
 {
   bytes_per_block = granularity;
   ceph_assert(isp2(bytes_per_block));
-  size = p2align(new_size, bytes_per_block);
+  size = p2align(new_size, bytes_per_block); // 按照 bytes_per_block 取整
   // 默认 128
   blocks_per_key = cct->_conf->bluestore_freelist_blocks_per_key;
 
@@ -81,6 +87,7 @@ int BitmapFreelistManager::create(uint64_t new_size, uint64_t granularity,
   // 当超过磁盘大小时将多出的部分全部标脏
   // 这么做是为了能够对齐处理 block kvDB
   blocks = size_2_block_count(size);
+
   if (blocks * bytes_per_block > size) {
     dout(10) << __func__ << " rounding blocks up from 0x" << std::hex << size
 	     << " to 0x" << (blocks * bytes_per_block)
@@ -283,11 +290,15 @@ int BitmapFreelistManager::_read_cfg(
   return 0;
 }
 
+/**
+ * 初始化一些杂项
+ */
 void BitmapFreelistManager::_init_misc()
 {
-  // >> 3 == / 8 => bits to bytes
+  // blocks_per_key 表示一个 rocksdb kv 对表示多少个 block
+  // 一个 block 用一个 bit 表示，右移 3 位将 bit 转换位 bytes，即一个 kv 对中的 value 需要多少字节
   bufferptr z(blocks_per_key >> 3);
-  // 全部标脏
+  // 将表示一个 block 是否被使用的 bit 全部设置为 1
   memset(z.c_str(), 0xff, z.length());
   all_set_bl.clear();
   all_set_bl.append(z);
@@ -488,6 +499,10 @@ void BitmapFreelistManager::dump(KeyValueDB *kvdb)
   }
 }
 
+/**
+ * allocate 和 release 都是执行 xor
+ * xor 相同为 0 不同为 1，所以 0 xor 1 = 1; 1 xor 1 = 0，因此两个操作可以合并
+ */
 void BitmapFreelistManager::allocate(
   uint64_t offset, uint64_t length,
   KeyValueDB::Transaction txn)
@@ -498,7 +513,6 @@ void BitmapFreelistManager::allocate(
     _xor(offset, length, txn);
   }
 }
-
 void BitmapFreelistManager::release(
   uint64_t offset, uint64_t length,
   KeyValueDB::Transaction txn)
@@ -510,16 +524,21 @@ void BitmapFreelistManager::release(
   }
 }
 
+/**
+ * 0 表示空闲，1 表示使用
+ */
 void BitmapFreelistManager::_xor(
   uint64_t offset, uint64_t length,
   KeyValueDB::Transaction txn)
 {
-  // must be block aligned
+  // must be block aligned，偏移和长度必须是 block 对齐的
+  // block 是磁盘访问的最小单位，因此只能从 block 的起始位置访问整个 block
   ceph_assert((offset & block_mask) == offset);
   ceph_assert((length & block_mask) == length);
 
-  // 取整
+  // 获取 offset 对应的 block 所在 key（rocksdb 的最小访问单元是 kv -> 128 个 bit）
   uint64_t first_key = offset & key_mask;
+  // 获取 offset+length 对应的 block 所在的 key
   uint64_t last_key = (offset + length - 1) & key_mask;
   dout(20) << __func__ << " first_key 0x" << std::hex << first_key
 	   << " last_key 0x" << last_key << std::dec << dendl;
@@ -534,8 +553,8 @@ void BitmapFreelistManager::_xor(
     /**
      * 遍历 s 到 e 的 block
      * 一个 block 用一个 bit 表示，p[] 取的是某个字节，i >> 3 即获取 block 的 bit 在哪个字节中
-     * i & 7 即 block 索引在一个字节内的索引
-     * 执行完成后 offset ~ len 所覆盖的 block 对应的 bit 全部标脏/清零
+     * 7 的二进制表示是 0111，i & 7 即 block 编号在一个字节内的索引
+     * 执行完成后 offset ~ len 所覆盖的 block 对应的 bit 全部标脏
      */
     for (unsigned i = s; i <= e; ++i) {
       p[i >> 3] ^= 1ull << (i & 7);
@@ -543,13 +562,15 @@ void BitmapFreelistManager::_xor(
     string k;
     make_offset_key(first_key, &k);
     bufferlist bl;
-    bl.append(p);
+    bl.append(p); // 将 ptr 插入到 buffer list 中
     dout(30) << __func__ << " 0x" << std::hex << first_key << std::dec << ": ";
     bl.hexdump(*_dout, false);
     *_dout << dendl;
     txn->merge(bitmap_prefix, k, bl);
   } else {
-    // first key
+    // 涉及到多个 key
+    // 第一个 key 从 offset 开始到最后全部设置为 1
+    // 最后一个 key 从 0 开始到 length
     {
       bufferptr p(blocks_per_key >> 3);
       p.zero();
@@ -601,7 +622,9 @@ void BitmapFreelistManager::_xor(
 
 uint64_t BitmapFreelistManager::size_2_block_count(uint64_t target_size) const
 {
+  // blocks 根据 bytes_per_block 向下取整
   auto target_blocks = target_size / bytes_per_block;
+  // 再根据 blocks_per_key 向上取整，以获取足够且对齐的 kv
   if (target_blocks / blocks_per_key * blocks_per_key != target_blocks) {
     target_blocks = (target_blocks / blocks_per_key + 1) * blocks_per_key;
   }

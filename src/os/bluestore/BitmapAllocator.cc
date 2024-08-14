@@ -25,12 +25,13 @@ int64_t BitmapAllocator::allocate(
   int64_t hint, PExtentVector *extents)
 {
   uint64_t allocated = 0;
+  // 获取当前数组的大小，用于后续打印分配详情
   size_t old_size = extents->size();
   ldout(cct, 10) << __func__ << std::hex << " 0x" << want_size
 		 << "/" << alloc_unit << "," << max_alloc_size << "," << hint
 		 << std::dec << dendl;
-    
-    
+
+  // 调用 l2 接口来分配空间
   _allocate_l2(want_size, alloc_unit, max_alloc_size, hint,
     &allocated, extents);
   if (!allocated) {
@@ -68,9 +69,9 @@ void BitmapAllocator::init_add_free(uint64_t offset, uint64_t length)
   ldout(cct, 10) << __func__ << " 0x" << std::hex << offset << "~" << length
 		  << std::dec << dendl;
 
-  auto mas = get_min_alloc_size();
-  uint64_t offs = round_up_to(offset, mas);
-  uint64_t l = p2align(offset + length - offs, mas);
+  auto mas = get_min_alloc_size(); // l0_granularity
+  uint64_t offs = round_up_to(offset, mas); // 将 offset 基于 mas 向上取整
+  uint64_t l = p2align(offset + length - offs, mas); // length - 向上取整多出来的部分 再基于 mas 向下对齐，即最小长度
   ceph_assert(offs + l <= (uint64_t)device_size);
 
   _mark_free(offs, l);

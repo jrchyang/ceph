@@ -12,6 +12,32 @@
 #include "include/mempool.h"
 #include "common/debug.h"
 
+
+/**
+ * 1. 内存尽可能与 x86 L1 cache line 对齐以提升性能
+ * 2. 尽可能一次操作 64 bit 而不是一次操作 1 bit
+ * 3. 整个结构采用类树型管理以提高查找速度
+ */
+
+/**
+ *    | AU | AU |                    ......                    |   disk
+ *    | 0  | 1  |                    ......                    |   L0
+ *    .                         .
+ *       .     64 bytes      .
+ *          . (512 bits) .
+ *              .    .
+ *              | 00 |  ...  | 01 |  ...  | 11 |                   L1
+ *               .          64 bytes          .
+ *                    .     (512 bits)    .
+ *                         .         .
+ *                            .   .
+ *                        | 0 | 0 | 1 |                            L2
+ *
+ * L0 : 一个 bit 对应一个最小分配单元，0 表示已使用，1 表示未分配
+ * L1 : 两个 bit 对应 L0 的 64 个最小分配单元，00 表示全部已使用，11 表示全部未使用，01 表示部分已使用
+ * L2 : 一个 bit 对应 64 个 L1 的 bit，也就是 32 * 64 个最小分配单元，0 表示全部已使用，1 表示部分已使用
+ */
+
 class BitmapAllocator : public Allocator,
   public AllocatorLevel02<AllocatorLevel01Loose> {
   CephContext* cct;

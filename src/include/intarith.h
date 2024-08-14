@@ -52,6 +52,8 @@ constexpr inline bool isp2(T x) {
  * eg, p2align(1024, 1024) == 1024 (1*align)
  * eg, p2align(0x1234, 0x100) == 0x1200 (0x12*align)
  * eg, p2align(0x5600, 0x100) == 0x5600 (0x56*align)
+ *
+ * -align 表示 align 的补码，即 ~align+1 ，如果 align 是 2 的幂，则等于 ~(align-1)
  */
 template<typename T>
 constexpr inline T p2align(T x, T align) {

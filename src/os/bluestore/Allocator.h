@@ -17,6 +17,11 @@
 #include "include/ceph_assert.h"
 #include "bluestore_types.h"
 
+/**
+ * allocator 只负责在内存中将空间空间标记为已分配，最终磁盘空间使用情况由调用者负责，
+ * bluefs 通过日志直接写在磁盘上，bluestore 通过 freelistmanager 持久化到 rocksdb 中
+ */
+
 class Allocator {
 public:
   Allocator(std::string_view name,
@@ -98,8 +103,8 @@ private:
   class SocketHook;
   SocketHook* asok_hook = nullptr;
 protected:
-  const int64_t device_size = 0;
-  const int64_t block_size = 0;
+  const int64_t device_size = 0;  // 磁盘容量
+  const int64_t block_size = 0;   // 磁盘块大小（磁盘固件信息），bitmap 分配器中对应 alloc unit
 };
 
 #endif

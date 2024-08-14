@@ -5608,6 +5608,11 @@ void BlueStore::_close_bdev()
   bdev = NULL;
 }
 
+/**
+ * 通过 t 是否为真判断是创建还是加载
+ *   bluestore mkfs 调用时会传入 t，此时是创建，会向 rocksdb 中写入元数据
+ *   bluestore mount 调用时 t 为 nullptr，此时是初始化，会从 rocksdb 中加载元数据
+ */
 int BlueStore::_open_fm(KeyValueDB::Transaction t,
                         bool read_only,
                         bool db_avail,
@@ -5634,11 +5639,13 @@ int BlueStore::_open_fm(KeyValueDB::Transaction t,
     freelist_type = "null";
     need_to_destage_allocation_file = true;
   }
+  // 创建空的 Freelist Manager
   fm = FreelistManager::create(cct, freelist_type, PREFIX_ALLOC);
   ceph_assert(fm);
   if (t) {
     // create mode. initialize freespace
     dout(20) << __func__ << " initializing freespace" << dendl;
+    // 写入空闲列表类型
     {
       bufferlist bl;
       bl.append(freelist_type);
@@ -5660,6 +5667,7 @@ int BlueStore::_open_fm(KeyValueDB::Transaction t,
       return -EINVAL;
     }
 
+    // 根据类型创建，内部会进行各种初始化
     fm->create(bdev->get_size(), alloc_size,
 	       zone_size, first_sequential_zone,
 	       t);
@@ -5667,6 +5675,7 @@ int BlueStore::_open_fm(KeyValueDB::Transaction t,
     // allocate superblock reserved space.  note that we do not mark
     // bluefs space as allocated in the freelist; we instead rely on
     // bluefs doing that itself.
+    // 标记预留空间为已分配
     auto reserved = _get_ondisk_reserved();
     if (fm_restore) {
       // we need to allocate the full space in restore case
@@ -5679,7 +5688,7 @@ int BlueStore::_open_fm(KeyValueDB::Transaction t,
       fm->allocate(0, reserved, t);
     }
     // debug code - not needed for NULL FM
-    // 调试代码 - 模拟碎片问题
+    // 调试代码 - 模拟碎片问题，bluestore_debug_prefill 默认为 0
     if (cct->_conf->bluestore_debug_prefill > 0) {
       uint64_t end = bdev->get_size() - reserved;
       dout(1) << __func__ << " pre-fragmenting freespace, using "

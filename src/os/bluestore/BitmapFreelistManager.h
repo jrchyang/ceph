@@ -14,7 +14,9 @@
 #include "kv/KeyValueDB.h"
 
 class BitmapFreelistManager : public FreelistManager {
+  // 在 rocksdb 中 key 的前缀，meta 为 B，bitmap 为 b
   std::string meta_prefix, bitmap_prefix;
+  // merge 操作，实际上就是按位异或
   std::shared_ptr<KeyValueDB::MergeOperator> merge_op;
   ceph::mutex lock = ceph::make_mutex("BitmapFreelistManager::lock");
 
@@ -25,10 +27,10 @@ class BitmapFreelistManager : public FreelistManager {
   uint64_t blocks;          ///< size of device (blocks, size rounded up)
 
   // something like 0xFFFF0000
-  uint64_t block_mask;  ///< mask to convert byte offset to block offset,
-  uint64_t key_mask;    ///< mask to convert offset to key offset,
+  uint64_t block_mask;  ///< mask to convert byte offset to block offset, block offset 取余
+  uint64_t key_mask;    ///< mask to convert offset to key offset, key offset 取整
 
-  ceph::buffer::list all_set_bl; ///< 单个 key 全部 block 标脏的数据
+  ceph::buffer::list all_set_bl; ///< 单个 key 对应的 value 的 buffer
 
  // 遍历 rocksdb key 相关的成员
   KeyValueDB::Iterator enumerate_p;
