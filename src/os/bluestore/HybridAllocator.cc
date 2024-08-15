@@ -52,9 +52,15 @@ int64_t HybridAllocator::allocate(
 
   // try bitmap first to avoid unneeded contiguous extents split if
   // desired amount is less than shortes range in AVL
+  // 满足以下三个条件则使用 bitmap 分配器
+  //   1. 已经创建 bitmap 分配器
+  //   2. bitmap 分配器有空闲空间
+  //   3. avl 分配器的最小空间节点的空间大小大于要分配的空间大小
   if (bmap_alloc && bmap_alloc->get_free() &&
     want < _lowest_size_available()) {
+    // 调用 bitmap 分配器接口分配
     res = bmap_alloc->allocate(want, unit, max_alloc_size, hint, extents);
+    // 小于 0 说明没有分配出空间来
     if (res < 0) {
       // got a failure, release already allocated and
       // start over allocation from avl
@@ -68,6 +74,7 @@ int64_t HybridAllocator::allocate(
       bmap_alloc->release(local_extents);
       res = 0;
     }
+    // 如果分配的空间小于需要的空间，则继续从 avl 中分配
     if ((uint64_t)res < want) {
       auto res2 = _allocate(want - res, unit, max_alloc_size, hint, extents);
       if (res2 < 0) {
@@ -76,8 +83,9 @@ int64_t HybridAllocator::allocate(
         res += res2;
       }
     }
-  } else {
+  } else { // 直接从 avl 中分
     res = _allocate(want, unit, max_alloc_size, hint, extents);
+    // 分配失败
     if (res < 0) {
       // got a failure, release already allocated and
       // start over allocation from bitmap
@@ -191,6 +199,7 @@ void HybridAllocator::shutdown()
   }
 }
 
+// 处理 AvlAllocator 节点个数达到上限的情况
 void HybridAllocator::_spillover_range(uint64_t start, uint64_t end)
 {
   auto size = end - start;
@@ -200,6 +209,7 @@ void HybridAllocator::_spillover_range(uint64_t start, uint64_t end)
     << std::dec
     << dendl;
   ceph_assert(size);
+  // 如果是第一次溢出则创建 bmap_alloc 分配器
   if (!bmap_alloc) {
     dout(1) << __func__
       << std::hex
@@ -210,6 +220,7 @@ void HybridAllocator::_spillover_range(uint64_t start, uint64_t end)
       get_block_size(),
       get_name() + ".fallback");
   }
+  // 将节点初始化到 bitmap 分配器中
   bmap_alloc->init_add_free(start, size);
 }
 
