@@ -14821,8 +14821,12 @@ void BlueStore::_do_write_small(
 
   // 0x10000 Byte
   auto max_bsize = std::max(wctx->target_blob_size, min_alloc_size);
+  // min_off 表示要查找的可重用的 blob 的起始位置（不是 blob 的起始位置，只是查找的起始位置）
+  // small write 处理的都是未按照 最小分配单元 对齐的 IO，故其大小小于 最小分配单元
+  // 所以一般来讲其所在 le 的 blob 已分配
   auto min_off = offset >= max_bsize ? offset - max_bsize : 0;
   uint32_t alloc_len = min_alloc_size;
+  // offset 对 alloc_len 取整
   auto offset0 = p2align<uint64_t>(offset, alloc_len);
 
   bool any_change;
@@ -14870,10 +14874,11 @@ void BlueStore::_do_write_small(
   auto ep = o->extent_map.seek_lextent(offset);
   if (ep != begin) {
     --ep;
-    if (ep->blob_end() <= offset) {
+    if (ep->blob_end() <= offset) { // 前一个 extent map 的 blob 范围包含了本次写请求的 offset
       ++ep;
     }
   }
+  // 所属 extent 的前一个 extent
   auto prev_ep = end;
   if (ep != begin) {
     prev_ep = ep;
@@ -14894,6 +14899,9 @@ void BlueStore::_do_write_small(
   do {
     any_change = false;
 
+    // 查找时找的是 logical_offset >= offset 的 extent
+    // 如果 ep->logical_offset < offset + max_bsize 说明这个 extent 不会与要写入的数据产生重叠
+    // 因为 small write 的 IO 大小肯定小于 max_bsize，此时应该进入下一个大的 if 去判断前一个 le
     if (ep != end && ep->logical_offset < offset + max_bsize) {
       BlobRef b = ep->blob;
       if (!above_blob_threshold) {
@@ -14905,14 +14913,16 @@ void BlueStore::_do_write_small(
 
       dout(20) << __func__ << " considering " << *b
 	       << " bstart 0x" << std::hex << bstart << std::dec << dendl;
-      if (bstart >= end_offs) {
+      if (bstart >= end_offs) { // 此时 extent 的 blob 起始位置也超过 IO 的结束位置，跳过
 	dout(20) << __func__ << " ignoring distant " << *b << dendl;
-      } else if (!b->get_blob().is_mutable()) {
+      } else if (!b->get_blob().is_mutable()) { // blob 不可修改，跳过
 	dout(20) << __func__ << " ignoring immutable " << *b << dendl;
       } else if (ep->logical_offset % min_alloc_size !=
-		  ep->blob_offset % min_alloc_size) {
+		  ep->blob_offset % min_alloc_size) { // 偏移不一致，跳过
 	dout(20) << __func__ << " ignoring offset-skewed " << *b << dendl;
-      } else {
+      } else {	// blob 与 IO 有重叠，这里需要注意的是，进入 small write 的 IO 大小一定是小于
+		// 最小分配单位的，而 blob 管理的物理空间是按照最小分配单位来分配的。
+		// 所以当 bstart < end_offs 时，说明 blob 已经完整包含了此次 IO 范围
 	uint64_t chunk_size = b->get_blob().get_chunk_size(block_size);
 	// can we pad our head/tail out with zeros?
 	uint64_t head_pad, tail_pad;
@@ -14922,6 +14932,8 @@ void BlueStore::_do_write_small(
 	  o->extent_map.fault_range(db, offset - head_pad,
 				    end_offs - offset + head_pad + tail_pad);
 	}
+	// 判断不对齐的地方是否已经写过数据了，如果写过，则设置为 0
+	// 在下边判断是否可以直接写的时候会因为不对齐走到需要读数据的地方
 	if (head_pad &&
 	    o->extent_map.has_any_lextents(offset - head_pad, head_pad)) {
 	  head_pad = 0;
@@ -14930,10 +14942,13 @@ void BlueStore::_do_write_small(
 	  tail_pad = 0;
 	}
 
+	// blob 内的偏移
 	uint64_t b_off = offset - head_pad - bstart;
+	// blob 内的长度
 	uint64_t b_len = length + head_pad + tail_pad;
 
 	// direct write into unused blocks of an existing mutable blob?
+	// 与 chunk 对齐、未分配到响应的 le、已分配空间，此时可以直接写入
 	if ((b_off % chunk_size == 0 && b_len % chunk_size == 0) &&
 	    b->get_blob().get_ondisk_length() >= b_off + b_len &&
 	    b->get_blob().is_unused(b_off, b_len) &&
@@ -15004,6 +15019,7 @@ void BlueStore::_do_write_small(
 
 	  dout(20) << __func__ << "  reading head 0x" << std::hex << head_read
 		   << " and tail 0x" << tail_read << std::dec << dendl;
+	  // 先读数据
 	  if (head_read) {
 	    bufferlist head_bl;
 	    int r = _do_read(c.get(), o, offset - head_pad - head_read, head_read,
@@ -15063,6 +15079,7 @@ void BlueStore::_do_write_small(
 	  return;
 	}
 	// try to reuse blob if we can
+	// 重用 blob 指的是 blob 未分配的空间的那种，重新分配空间
 	if (b->can_reuse_blob(min_alloc_size,
 			      max_bsize,
 			      offset0 - bstart,
@@ -15096,7 +15113,7 @@ void BlueStore::_do_write_small(
 		       << std::dec << dendl;
 
 	      wctx->write(offset, b, alloc_len, b_off0, bl, b_off, length,
-		  false, false);
+		  false, false); // 分配一个空间给 blob
 	      logger->inc(l_bluestore_write_small_unused);
 	    } else { // if (bl.is_zero())
 	      dout(20) << __func__ << " skip small zero block " << std::hex
@@ -15200,6 +15217,8 @@ void BlueStore::_do_write_small(
               << std::hex << offset << "~" << length
 	      << std::dec << dendl;
   }
+
+  // 到这里不能重用 blob, 新创建一个
   uint64_t b_off = p2phase<uint64_t>(offset, alloc_len);
   uint64_t b_off0 = b_off;
   o->extent_map.punch_hole(c, offset, length, &wctx->old_extents);
@@ -16060,12 +16079,15 @@ void BlueStore::_do_write_data(
     uint64_t middle_offset, middle_length;
     uint64_t tail_offset, tail_length;
 
+    // 请求头未与最小分配单位对齐的部分走 small write
     head_offset = offset;
     head_length = p2nphase(offset, min_alloc_size);
 
+    // 请求尾未与最小分配单位对齐的部分走 small write
     tail_offset = p2align(end, min_alloc_size);
     tail_length = p2phase(end, min_alloc_size);
 
+    // 中间部分与最小分配单位对齐的部分走 big write
     middle_offset = head_offset + head_length;
     middle_length = length - head_length - tail_length;
 
@@ -16090,7 +16112,7 @@ void BlueStore::_choose_write_options(
   if (fadvise_flags & CEPH_OSD_OP_FLAG_FADVISE_WILLNEED) {
     dout(20) << __func__ << " will do buffered write" << dendl;
     wctx->buffered = true;
-  } else if (cct->_conf->bluestore_default_buffered_write &&
+  } else if (cct->_conf->bluestore_default_buffered_write && // 默认为 false
 	     (fadvise_flags & (CEPH_OSD_OP_FLAG_FADVISE_DONTNEED |
 			       CEPH_OSD_OP_FLAG_FADVISE_NOCACHE)) == 0) {
     dout(20) << __func__ << " defaulting to buffered write" << dendl;
@@ -16102,6 +16124,7 @@ void BlueStore::_choose_write_options(
 
   // compression parameters
   unsigned alloc_hints = o->onode.alloc_hint_flags;
+  // 默认压缩类型：none
   auto cm = select_option(
     "compression_mode",
     comp_mode.load(),
@@ -16115,6 +16138,7 @@ void BlueStore::_choose_write_options(
     }
   );
 
+  // 默认为开启压缩
   wctx->compress = (cm != Compressor::COMP_NONE) &&
     ((cm == Compressor::COMP_FORCE) ||
      (cm == Compressor::COMP_AGGRESSIVE &&
@@ -16166,7 +16190,7 @@ void BlueStore::_choose_write_options(
     }
   }
 
-  // 默认 64K => 0x10000
+  // max_blob_size 默认 64K => 0x10000
   uint64_t max_bsize = max_blob_size.load();
   if (wctx->target_blob_size == 0 || wctx->target_blob_size > max_bsize) {
     wctx->target_blob_size = max_bsize;
@@ -16279,6 +16303,7 @@ int BlueStore::_do_write(
   auto dirty_end = end;
 
   WriteContext wctx;
+  // 获取配置中的一些写请求处理的选项
   _choose_write_options(c, o, fadvise_flags, &wctx);
   // 加载 shard
   o->extent_map.fault_range(db, offset, length);
