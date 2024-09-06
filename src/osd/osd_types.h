@@ -393,8 +393,8 @@ WRITE_CLASS_ENCODER(old_pg_t)
 
 // placement group id
 struct pg_t {
-  uint64_t m_pool;
-  uint32_t m_seed;
+  uint64_t m_pool;	// pg 所在的 pool
+  uint32_t m_seed;	// pg 的序号
 
   pg_t() : m_pool(0), m_seed(0) {}
   pg_t(ps_t seed, uint64_t pool) :
@@ -542,7 +542,7 @@ namespace std {
 
 struct spg_t {
   pg_t pgid;
-  shard_id_t shard;
+  shard_id_t shard; // 代表该 PG 所在的 OSD 在对应的 OSD 列表中的序号
   spg_t() : shard(shard_id_t::NO_SHARD) {}
   spg_t(pg_t pgid, shard_id_t shard) : pgid(pgid), shard(shard) {}
   explicit spg_t(pg_t pgid) : pgid(pgid), shard(shard_id_t::NO_SHARD) {}
@@ -1226,8 +1226,8 @@ struct pg_pool_t {
 
   enum {
     TYPE_REPLICATED = 1,     // replication
-    //TYPE_RAID4 = 2,   // raid4 (never implemented)
-    TYPE_ERASURE = 3,      // erasure-coded
+    // TYPE_RAID4 = 2,       // raid4 (never implemented)
+    TYPE_ERASURE = 3,        // erasure-coded
   };
   static constexpr uint32_t pg_CRUSH_ITEM_NONE = 0x7fffffff; /* can't import crush.h here */
   static std::string_view get_type_name(int t) {
@@ -1428,14 +1428,23 @@ struct pg_pool_t {
   }
 
   utime_t create_time;
+  // pool 的相关标志位
   uint64_t flags = 0;           ///< FLAG_*
+  // 资源池冗余类型，当前只有 副本 和 纠删码 两种
   __u8 type = 0;                ///< TYPE_*
+  // 副本数和至少保证的副本数
+  // 如果是 副本 模式，size 定义了副本数目，min_size 为副本的最小数目。
+  // 例如：如果 size 设置为 3，副本数则为 3，min_size 设置为 1 则允许两个副本损坏
+  // 如果是 纠删码 模式，size 是总的分片数 K+M，min_size 是实际数据的分片数 K
   __u8 size = 0, min_size = 0;  ///< number of osds in each pg
+  // pool 对应的 crush 规则号
   __u8 crush_rule = 0;          ///< crush placement rule
+  // 对象映射的 hash 函数
   __u8 object_hash = 0;         ///< hash mapping object name to ps
   pg_autoscale_mode_t pg_autoscale_mode = pg_autoscale_mode_t::UNKNOWN;
 
 private:
+  // pg 的数量
   __u32 pg_num = 0, pgp_num = 0;  ///< number of pgs
   __u32 pg_num_pending = 0;       ///< pg_num we are about to merge down to
   __u32 pg_num_target = 0;        ///< pg_num we should converge toward
@@ -1443,6 +1452,7 @@ private:
 
 public:
   std::map<std::string, std::string> properties;  ///< OBSOLETE
+  // EC 的配置信息
   std::string erasure_code_profile; ///< name of the erasure code profile in OSDMap
   epoch_t last_change = 0;      ///< most recent epoch changed, exclusing snapshot changes
   // If non-zero, require OSDs in at least this many different instances...
@@ -4262,10 +4272,27 @@ WRITE_CLASS_ENCODER(pg_log_op_return_item_t)
  */
 struct pg_log_entry_t {
   enum {
+    // 除删除之外的修改对象操作（注意：创建对象也会归结为 MODIFY 操作，此时 prior_version 为 0）
     MODIFY = 1,   // some unspecified modification (but not *all* modifications)
+    // PG 当前并不支持由客户端直接发起克隆操作，这里指 PG 在处理 head 对象时
+    // 受快照影响基于 COW 机制内部产生的克隆（head 对象）操作
     CLONE = 2,    // cloned object from head
+    // 删除对象
     DELETE = 3,   // deleted object
     //BACKLOG = 4,  // event invented by generate_backlog [obsolete]
+
+    /**
+     * Peering 完成后，如果 PG 仍然存在 unfound/unrecoverable 对象，并且确认所有可能
+     * 包含这些对象有效数据的 OSD 当前都已经被探测（Probe）过，那么可以通过如下命令：
+     *   ceph pg <pgid> mark_unfound_lost revert|delete
+     * 以回滚/删除的方式对这些对象进行修复
+     * 上述命令执行后将触发 PG 针对所有 unfound/unrecoverable 对象进行遍历，并以此执行：
+     *   1) 如果选项为 revert，则选择对象当前所能获得的最新版本，生成一条新的 LOST_REVERT 日志，
+     *      并设置日志中的 reverting_to 为该版本，后续将对象回滚至 reverting_to 指向的版本
+     *   2) 如果选项为 delete，则生成一条新的 LOST_DELETE 日志，后续直接删除对象
+     * PG 批量提交上述流程中所有新生成的日志之后（此时命令执行完成），所有 unfound/unrecovered
+     * 对象的修复可以在后台基于更新后的日志进行
+     */
     LOST_REVERT = 5, // lost new version, revert to an older version.
     LOST_DELETE = 6, // lost new version, revert to no object (deleted).
     LOST_MARK = 7,   // lost new version, now EIO
@@ -4303,17 +4330,24 @@ struct pg_log_entry_t {
 
   // describes state for a locally-rollbackable entry
   ObjectModDesc mod_desc;
-  ceph::buffer::list snaps;   // only for clone entries
-  hobject_t  soid;
-  osd_reqid_t reqid;  // caller+tid to uniquely identify request
+  ceph::buffer::list snaps;	// only for clone entries
+  hobject_t  soid;		// 待修改的对象
+  // op 携带的唯一标识，由客户端通过 caller_name + incarnation + tid 生成
+  // 主要用于对客户端重发的 op 进行识别
+  osd_reqid_t reqid;		// caller+tid to uniquely identify request
   mempool::osd_pglog::vector<std::pair<osd_reqid_t, version_t> > extra_reqids;
 
   /// map extra_reqids by index to error return code (if any)
   mempool::osd_pglog::map<uint32_t, int> extra_reqid_return_codes;
 
-  eversion_t version, prior_version, reverting_to;
-  version_t user_version; // the user version for this entry
-  utime_t     mtime;  // this is the _user_ mtime, mind you
+  eversion_t version;		// 指本次修改生效之后对象的版本号
+  eversion_t prior_version;	// 指本次修改生效之前对象的版本号
+  eversion_t reverting_to;	// 指针对 unfound/unrecovered 对象通过回滚操作进行修复时，待回滚的版本号
+  
+  version_t user_version;	// 对象当前的版本号，对客户端可见
+				// the user version for this entry
+  utime_t mtime;		// 如果本次修改由客户端发起，那么 op 会携带客户端生成 op 时的本地时间
+				// this is the _user_ mtime, mind you
   int32_t return_code; // only stored for ERRORs for dup detection
 
   std::vector<pg_log_op_return_item_t> op_returns;
@@ -4454,6 +4488,7 @@ std::ostream& operator<<(std::ostream& out, const pg_log_dup_t& e);
  * pg_log_t - incremental log of recent pg changes.
  *
  *  serves as a recovery queue for recent changes.
+ *  日志队列
  */
 struct pg_log_t {
   /*
@@ -4462,11 +4497,14 @@ struct pg_log_t {
    *          complete negative information.  
    * i.e. we can infer pg contents for any store whose last_update >= tail.
    */
-  eversion_t head;    // newest entry
-  eversion_t tail;    // version prior to oldest
+  eversion_t head;	// log 中包含的最新日志条目（指向队列尾部）
+  			// newest entry
+  eversion_t tail;	// log 中包含的最老日志条目（指向队列头部）
+  			// version prior to oldest
 
 protected:
   // We can rollback rollback-able entries > can_rollback_to
+  // log 中所有 version 大于等于 can_rollback_to 的条目都可以回滚（仅纠删码类型的存储池支持）
   eversion_t can_rollback_to;
 
   // always <= can_rollback_to, indicates how far stashed rollback
@@ -4475,6 +4513,7 @@ protected:
 
 public:
   // the actual log
+  // 日志队列，新的日志条目总是从队列尾部追加
   mempool::osd_pglog::list<pg_log_entry_t> log;
 
   // entries just for dup op detection ordered oldest to newest
@@ -5516,13 +5555,20 @@ inline std::ostream& operator<<(std::ostream& out, const OSDSuperblock& sb)
 /*
  * attached to object head.  describes most recent snap context, and
  * set of existing clones.
+ * 对象 SS 属性的磁盘结构，保存对象快照及克隆信息
  */
 struct SnapSet {
+  // 对象当前（指上一次修改操作完成时）关联的最新快照序列号
   snapid_t seq;
   // NOTE: this is for pre-octopus compatibility only! remove in Q release
+  // 当前对象（指上一次修改操作完成时）关联的所有快照序列号（包含 seq）
   std::vector<snapid_t> snaps;    // descending
-  std::vector<snapid_t> clones;   // ascending
-  std::map<snapid_t, interval_set<uint64_t> > clone_overlap;  // overlap w/ next newest
+  // 对象关联的所有克隆对象，使用每个克隆对象关联的最新快照序列号
+  // （一个克隆对象可以关联多个快照）进行标识，生序排列
+  std::vector<snapid_t> clones;
+  // 当前克隆对象与前一个克隆对象（与它们在 clones 中的位置相对应）之间的重叠部分
+  std::map<snapid_t, interval_set<uint64_t> > clone_overlap;
+  // 克隆对象大小
   std::map<snapid_t, uint64_t> clone_size;
   std::map<snapid_t, std::vector<snapid_t>> clone_snaps; // descending
 
@@ -5829,14 +5875,20 @@ WRITE_CLASS_ENCODER(object_manifest_t)
 std::ostream& operator<<(std::ostream& out, const object_manifest_t& oi);
 
 struct object_info_t {
-  hobject_t soid;
-  eversion_t version, prior_version;
-  version_t user_version;
-  osd_reqid_t last_reqid;
+  hobject_t soid;		// 对象唯一标识
+				// 如果 soid.snap 为 CEPH_NOSNAP 说明为 head 对象
+				// 如果 soid.snap 为 CEPH_SNAPDIR 说明为 snapdir 对象
+  eversion_t version;		// 上一次修改本对象时，PG 生成的版本号
+  eversion_t prior_version;	// 上上次修改本对象时，PG 生成的版本号；如果为空（eversion_t()），
+				// 表明上上次修改动作为创建或者克隆（即对象从无到有）
+  version_t user_version;	// 客户端（可见）版本号
+  osd_reqid_t last_reqid;	// 上一次客户端修改本对象时，由客户端生成的唯一请求标识
 
-  uint64_t size;
-  utime_t mtime;
-  utime_t local_mtime; // local mtime
+  uint64_t size;		// 对象大小
+  utime_t mtime;		// 上一次客户端修改本对象时，所携带的本地时间
+  utime_t local_mtime;		// 上一次客户端修改本对象时，PG 响应此请求的本地时间。
+				// 说明：主要用于解决客户端和服务端时钟产生偏移时（特别是客户端时间超前于服务端）
+				// Cache Tier 无法正常执行 flush 操作的故障
 
   // note: these are currently encoded into a total 16 bits; see
   // encode()/decode() for the weirdness.
@@ -5853,7 +5905,8 @@ struct object_info_t {
     FLAG_REDIRECT_HAS_REFERENCE = 1<<9, // has reference
   } flag_t;
 
-  flag_t flags;
+  flag_t flags;	// FLAG_DATA_DIGEST/FLAG_OMAP/FLAG_OMAP_DIGEST 用于指示对象当前是否包含数据校验和、
+		// 是否使用了 omap、是否包含 omap 校验和
 
   static std::string get_flag_string(flag_t flags) {
     std::string s;
@@ -5895,15 +5948,18 @@ struct object_info_t {
 
   uint64_t truncate_seq, truncate_size;
 
+  // 成功注册过 Watch 本对象的所有客户端信息
   std::map<std::pair<uint64_t, entity_name_t>, watch_info_t> watchers;
 
   // opportunistic checksums; may or may not be present
-  __u32 data_digest;  ///< data crc32c
-  __u32 omap_digest;  ///< omap crc32c
+  __u32 data_digest;  ///< data crc32c 数据校验和
+  __u32 omap_digest;  ///< omap crc32c omap 校验和
   
   // alloc hint attribute
-  uint64_t expected_object_size, expected_write_size;
-  uint32_t alloc_hint_flags;
+  uint64_t expected_object_size;	// 由特定应用（客户端）下发的对象大小提示
+  uint64_t expected_write_size;		// 由特定应用（客户端）下发的写请求大小提示
+  uint32_t alloc_hint_flags;		// 由特定应用（客户端）下发的对象特征及访问提示，
+					// 例如连续读写、随机读写、仅进行追加写、是否建议进行压缩等
 
   struct object_manifest_t manifest;
 

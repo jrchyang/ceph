@@ -18,13 +18,17 @@ using peer_type_t = int;
 template<class ThrottleType>
 struct Policy {
   /// If true, the Connection is tossed out on errors.
-  bool lossy;		// 如果为 true 当该链接出现错误时就删除
+  // 如果为 true，当该链接出现错误时就删除
+  bool lossy;
   /// If true, the underlying connection can't be re-established from this end.
-  bool server;		// 如果为 true 为服务端（都是被动链接）
+  // 如果为 true，为服务端，都是被动链接
+  bool server;
   /// If true, we will standby when idle
-  bool standby;		// 如果为 true 该链接处于等待状态
+  // 如果为 true，该链接处于等待状态
+  bool standby;
   /// If true, we will try to detect session resets
-  bool resetcheck;	// 如果为 true 该链接出错后重连
+  // 如果为 true，该链接出错后重连
+  bool resetcheck;
 
   /// Server: register lossy client connections.
   bool register_lossy_clients = true;

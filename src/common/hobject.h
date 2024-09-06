@@ -34,6 +34,7 @@ namespace ceph {
 #define INT64_MIN ((int64_t)0x8000000000000000ll)
 #endif
 
+// hash object
 struct hobject_t {
 public:
   static const int64_t POOL_META = -1;
@@ -50,19 +51,19 @@ public:
   }
 
 public:
-  object_t oid;
+  object_t oid;		// objectname (string)
   snapid_t snap;
 private:
-  uint32_t hash;
+  uint32_t hash;	// hash 不能和 key 同时设置，hash 值一般设置为 pg 的 id 值
   bool max;
   uint32_t nibblewise_key_cache;
   uint32_t hash_reverse_bits;
 public:
-  int64_t pool;
-  std::string nspace;
+  int64_t pool;		// 对象所属 pool 的 id
+  std::string nspace;	// 一般为空，用于表示特殊的对象
 
 private:
-  std::string key;
+  std::string key;	// 对象的特殊标记
 
   class hobject_t_max {};
 
@@ -378,9 +379,15 @@ static inline int cmp(const T&, const hobject_t&r) {
 
 typedef version_t gen_t;
 
+// ErasureCode 模式下的 PG
 struct ghobject_t {
   hobject_t hobj;
+  // 用于记录对象的版本号，当 PG 为 EC 时，写操作需要区分前后两个版本的 object，写操作保存
+  // 对象的上一个版本的对象，当 EC 写失败时，可以 rollback 到上一个版本
   gen_t generation;
+  // 用于标识对象所在的 osd 在 EC 类型的 PG 中的序号，对应 EC 来说，每个 osd 在 PG 中的
+  // 序号在数据恢复时非常关键。如果是 Replicate 类型的 PG，那么字段就设置为 NO_SHARD（-1）
+  // 该字段对于 replicate 是没用的
   shard_id_t shard_id;
   bool max;
 

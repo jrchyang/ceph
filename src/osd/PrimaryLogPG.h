@@ -613,16 +613,31 @@ public:
 
   /*
    * Capture all object state associated with an in-progress read or write.
+   *
+   * 引入 OpContext 意义如下：
+   *
+   *   1. 单个 op 可能操作多个对象（例如引入快照后，修改 head 对象之前可能需要先执行克隆，
+   *      因而会创建和操作克隆对象），需要分别记录相关对象上下文的变化并持续追踪他们的读写
+   *      互斥锁使用情况
+   *   2. 如果 op 涉及修改操作，那么会产生一条或者多条新的日志
+   *   3. 如果 op 涉及异步操作，那么需要注册一个或多个回调函数
+   *   4. 收集 op 相关的统计，例如读写次数、读写涉及的字节数等等，后续通过心跳机制上报给
+   *      Monitor 汇总，典型如实施存储池的配额管理
    */
   struct OpContext {
+    // 关联的客户端请求
     OpRequestRef op;
     osd_reqid_t reqid;
     std::vector<OSDOp> *ops;
 
+    // op 执行之前，对象状态
     const ObjectState *obs; // Old objectstate
+    // op 执行之前，对象关联的 SS 属性
     const SnapSet *snapset; // Old snapset
 
+    // op 执行之后（准确地说，是在 Primary 完成 op 事务封装之后），新的对象状态
     ObjectState new_obs;  // resulting ObjectState
+    // op 执行之后（准确地说，是在 Primary 完成 op 事务封装之后），新的 SS 属性
     SnapSet new_snapset;  // resulting SnapSet (in case of a write)
     //pg_stat_t new_stats;  // resulting Stats
     object_stat_sum_t delta_stats;
@@ -655,7 +670,10 @@ public:
     uint64_t bytes_written, bytes_read;
 
     utime_t mtime;
+    // 对象当前最新的快照上下文，每次收到 op 时，基于 op 或者 PGPool 更新
     SnapContext snapc;           // writer snap context
+    // 如果 op 包含修改操作，那么 PG 将为 op 生成一个 PG 内唯一的序列号，该序列号连续
+    // 且单调递增，用于后续（例如 Peering）对本次修改操作进行追踪和回溯
     eversion_t at_version;       // pg's current version pointer
     version_t user_at_version;   // pg's current user version pointer
 
@@ -665,11 +683,21 @@ public:
     int processed_subop_count = 0;
 
     PGTransactionUPtr op_t;
+    /**
+     * PG 基于当前 op 产生的所有日志集合
+     * 注意：日志是基于对象的。针对原始对象（例如 head 对象）的所有修改操作只会产生一条单一
+     *      的日志记录，但是快照机制的存在使得 PG 在执行 op 过程中有可能创建克隆对象、创建
+     *      或删除 snapdir 对象。因为后面这些操作是针对不同的对象，所以需要为其生成单独的
+     *      日志记录。这解释了这里为什么使用日志集合
+     */
     std::vector<pg_log_entry_t> log;
     std::optional<pg_hit_set_history_t> updated_hset_history;
 
+    // op 本次修改操作波及的数据范围
     interval_set<uint64_t> modified_ranges;
+    // 对象上下文
     ObjectContextRef obc;
+    // 克隆对象上下文，仅在 op 执行过程中产生了新的克隆，或者 op 直接针对快照对象或者克隆对象进行操作时加载
     ObjectContextRef clone_obc;    // if we created a clone
     ObjectContextRef head_obc;     // if we also update snapset (see trim_object)
 
@@ -688,10 +716,17 @@ public:
 
     hobject_t new_temp_oid, discard_temp_oid;  ///< temp objects we should start/stop tracking
 
+    // 回调上下文，OS 将事务写入日志后执行
     std::list<std::function<void()>> on_applied;
+    // 回调上下文，OS 将事务写入磁盘后执行（对 BlueStore 而言，写日志和写磁盘是同时完成的
     std::list<std::function<void()>> on_committed;
+    // op_finish 典型操作为删除 OpContext
+    // on_success 典型操作为执行 Watch/Notify 相关的操作
+    // 因此一般而言，这两个操作需要保证在 op 真正完成后（即 op 在所有副本之间都完成之后）执行
+    // 执行顺序为 on_success -> on_finish
     std::list<std::function<void()>> on_finish;
     std::list<std::function<void()>> on_success;
+
     template <typename F>
     void register_on_finish(F &&f) {
       on_finish.emplace_back(std::forward<F>(f));
@@ -722,7 +757,9 @@ public:
       return inflightreads == 0;
     }
 
+    // 读写锁类型
     RWState::State lock_type;
+    // 指向多个 ObjectContext 的 rwstate，用于同时访问多个对象（同一个对象的克隆对象、snapdir 对象等）的读写锁
     ObcLockManager lock_manager;
 
     std::map<int, std::unique_ptr<OpFinisher>> op_finishers;
@@ -796,31 +833,32 @@ public:
 
   /*
    * State on the PG primary associated with the replicated mutation
+   *
+   * 如果 op 包含修改操作，那么需要由 Primary 主导在副本之间执行分布式写。顾名思义，
+   * 当 op 涉及的事务由 Primary 完成封装之后，会由 RepGather 接管，在副本之间进行分发和同步
    */
   class RepGather {
   public:
-    hobject_t hoid;
-    OpRequestRef op;
-    xlist<RepGather*>::item queue_item;
+    hobject_t hoid;			// op 关联的对象标识
+    OpRequestRef op;			// RepGather 和 op 一一对应
+    xlist<RepGather*>::item queue_item;	// 负责将 RepGather 挂入 PG 的全局 repop_queue
     int nref;
 
     eversion_t v;
     int r = 0;
 
-    ceph_tid_t rep_tid;
+    ceph_tid_t rep_tid;	// RepGather 在 OSD 内的全局唯一标志
+    bool rep_aborted;	// RepGather 被终止，例如 PG 收到新的 OSDMap 并且需要切换到一个新的 Interval
+    bool all_committed;	// Primary 成功收到了所有副本（包括自身）已经成功将基于 op 生成的本地事务写入磁盘的应答
 
-    bool rep_aborted;
-    bool all_committed;
+    utime_t start;
 
-    utime_t   start;
+    eversion_t pg_local_last_complete;
 
-    eversion_t          pg_local_last_complete;
-
-    ObcLockManager lock_manager;
-
-    std::list<std::function<void()>> on_committed;
-    std::list<std::function<void()>> on_success;
-    std::list<std::function<void()>> on_finish;
+    ObcLockManager lock_manager;			// 同 OpContext 中的 lock_manager
+    std::list<std::function<void()>> on_committed;	// 同 OpContext 中的 on_committed
+    std::list<std::function<void()>> on_success;	// 同 OpContext 中的 on_success
+    std::list<std::function<void()>> on_finish;		// 同 OpContext 中的 on_finish
 
     RepGather(
       OpContext *c, ceph_tid_t rt,

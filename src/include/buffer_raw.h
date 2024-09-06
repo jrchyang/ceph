@@ -44,7 +44,7 @@ inline namespace v15_2_0 {
     std::pair<size_t, size_t> last_crc_offset {std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max()};
     std::pair<uint32_t, uint32_t> last_crc_val;
 
-    mutable ceph::spinlock crc_spinlock;
+    mutable ceph::spinlock crc_spinlock; // 自旋锁，保护 last_crc_val last_crc_offset
 
     explicit raw(unsigned l, int mempool=mempool::mempool_buffer_anon)
       : data(nullptr), len(l), nref(0), mempool(mempool) {

@@ -40,9 +40,12 @@ struct SnapRealmInfo {
 WRITE_CLASS_ENCODER(SnapRealmInfo)
 
 
+// 如果是前端应用自定义快照模式（例如 RBD，可以针对每个 image 执行快照操作），那么由前端应用
+// 下发的请求（op）会携带 SnapContext，指示当前的快照信息；如果是存储池快照模式，那么 PGPool
+// 中的 SnapContext 会指示当前存储池的快照信息（PG 每次更新 OSDMap 的同时会同步更新 PGPool）
 struct SnapContext {
-  snapid_t seq;            // 'time' stamp
-  std::vector<snapid_t> snaps;  // existent snaps, in descending order
+  snapid_t seq;			// 最新快照序列号
+  std::vector<snapid_t> snaps;	// 当前所有快照序列号（包含 seq 并且降序排列，亦即总有 snaps[0] == seq）
 
   SnapContext() {}
   SnapContext(snapid_t s, const std::vector<snapid_t>& v) : seq(s), snaps(v) {}    

@@ -7385,9 +7385,11 @@ void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRe
     OpRequestRef op = &(*i);
     ceph_assert(ms_can_fast_dispatch(op->get_req()));
     auto m = op->get_req<MOSDFastDispatchOp>();
+    // 消息的 epoch 大于 osd 的 epoch，则需要等待
     if (m->get_min_epoch() > osdmap->get_epoch()) {
       break;
     }
+    // 将 op 从队列中删除
     session->waiting_on_map.erase(i++);
     op->put();
 
@@ -7461,6 +7463,7 @@ void OSD::ms_fast_dispatch(Message *m)
     }
   }
 
+  // 根据 Message 创建 op
   OpRequestRef op = op_tracker.create_request<OpRequest, Message*>(m);
   {
 #ifdef WITH_LTTNG
@@ -7496,6 +7499,7 @@ void OSD::ms_fast_dispatch(Message *m)
     if (auto session = static_cast<Session*>(priv.get()); session) {
       std::lock_guard l{session->session_dispatch_lock};
       op->get();
+      // 将 op 加入到 session 内部的 waiting_on_map 队列
       session->waiting_on_map.push_back(*op);
       OSDMapRef nextmap = service.get_nextmap_reserved();
       dispatch_session_waiting(session, nextmap);
@@ -9936,6 +9940,7 @@ void OSD::enqueue_op(spg_t pg, OpRequestRef&& op, epoch_t epoch)
         unique_ptr<OpSchedulerItem::OpQueueable>(new PGRecoveryMsg(pg, std::move(op))),
         cost, priority, stamp, owner, epoch));
   } else {
+    // 请求进入 osd shard 调度队列
     op_shardedwq.queue(
       OpSchedulerItem(
         unique_ptr<OpSchedulerItem::OpQueueable>(new PGOpItem(pg, std::move(op))),
@@ -11434,6 +11439,7 @@ void OSD::ShardedOpWQ::_enqueue(OpSchedulerItem&& item) {
     return;
   }
 
+  // 根据 pg hash 对 shard 个数取余获取 shard 编号
   uint32_t shard_index =
     item.get_ordering_token().hash_to_shard(osd->shards.size());
 

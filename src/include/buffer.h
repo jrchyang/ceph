@@ -410,6 +410,7 @@ struct error_code;
   };
   /*
    * list - the useful bit!
+   * 多个 buffer::ptr 的列表，也就是多个内存数据段的列表
    */
 
   class CEPH_BUFFER_API list {

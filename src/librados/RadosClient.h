@@ -62,11 +62,14 @@ private:
     CONNECTED,
   } state{DISCONNECTED};	// 和 Monitor 的网络连接状态
 
-  MonClient monclient{cct, poolctx};	// Monitor 客户端
-  MgrClient mgrclient{cct, nullptr, &monclient.monmap};	// Mgr 客户端
-  Messenger *messenger{nullptr};// 网络消息接口
-
-  uint64_t instance_id{0};	// rados 客户端实例的 id
+  // Monitor 客户端
+  MonClient monclient{cct, poolctx};
+  // Mgr 客户端
+  MgrClient mgrclient{cct, nullptr, &monclient.monmap};
+  // 网络消息接口
+  Messenger *messenger{nullptr};
+  // rados 客户端实例的 id
+  uint64_t instance_id{0};
 
   bool _dispatch(Message *m);
   bool ms_dispatch(Message *m) override;
@@ -76,11 +79,13 @@ private:
   void ms_handle_remote_reset(Connection *con) override;
   bool ms_handle_refused(Connection *con) override;
 
-  Objecter *objecter{nullptr};	// objecter 对象指针
+  // objecter 对象指针
+  Objecter *objecter{nullptr};
 
   ceph::mutex lock = ceph::make_mutex("librados::RadosClient::lock");
   ceph::condition_variable cond;
-  int refcnt{1};		// 引用计数
+  // 引用计数
+  int refcnt{1};
 
   version_t log_last_version{0};
   rados_log_callback_t log_cb{nullptr};

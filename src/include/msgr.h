@@ -183,22 +183,21 @@ struct ceph_msg_header_old {
 
 // 消息传输相关的元数据
 struct ceph_msg_header {
-	__le64 seq;       /* message seq# for this session 内唯一序号 */
-	__le64 tid;       /* transaction id 全局唯一id */
-	__le16 type;      /* message type */
-	__le16 priority;  /* priority.  higher value == higher priority */
-	__le16 version;   /* version of message encoding 消息的编码版本 */
+	__le64 seq;        // 当前 session 内消息的唯一序号  /* message seq# for this session */
+	__le64 tid;        // 消息的全局唯一的 id  /* transaction id */
+	__le16 type;       // 消息类型  /* message type */
+	__le16 priority;   // 优先级  /* priority.  higher value == higher priority */
+	__le16 version;    // 消息编码的版本  /* version of message encoding */
 
-	__le32 front_len; /* bytes in main payload */
-	__le32 middle_len;/* bytes in middle payload */
-	__le32 data_len;  /* bytes of data payload */
-	__le16 data_off;  /* sender: include full offset;
-			     receiver: mask against ~PAGE_MASK */
+	__le32 front_len;  // payload 的长度 /* bytes in main payload */
+	__le32 middle_len; // middle 的长度  /* bytes in middle payload */
+	__le32 data_len;   // data 的长度    /* bytes of data payload */
+	__le16 data_off;   // 对象的数据偏移量 /* sender: include full offset; receiver: mask against ~PAGE_MASK */
 
 	struct ceph_entity_name src;	// 消息源
 
 	/* oldest code we think can decode this.  unknown if zero. */
-	// 旧代码用于兼容 如为零则忽略
+	// 一些旧的代码，用于兼容 如为零则忽略
 	__le16 compat_version;
 	__le16 reserved;
 	__le32 crc;       /* header crc32c */
@@ -233,16 +232,15 @@ struct ceph_msg_header2 {
  */
 
 struct ceph_msg_footer_old {
-	__le32 front_crc, middle_crc, data_crc;
-	__u8 flags;
+	__le32 front_crc, middle_crc, data_crc; // 分别对应 crc 校验码
+	__u8 flags;                             // 结束标志
 } __attribute__ ((packed));
 
 struct ceph_msg_footer {
-	// 各 crc 校验码
-	__le32 front_crc, middle_crc, data_crc;
+	__le32 front_crc, middle_crc, data_crc; // 分别对应 crc 校验码
 	// sig holds the 64 bits of the digital signature for the message PLR
-	__le64  sig;	// 消息的 64 位 signature
-	__u8 flags;	// 结束标志
+	__le64  sig;				// 消息的 64 位 signature
+	__u8 flags;				// 结束标志
 } __attribute__ ((packed));
 
 #define CEPH_MSG_FOOTER_COMPLETE  (1<<0)   /* msg wasn't aborted */

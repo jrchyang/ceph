@@ -5,6 +5,7 @@
 
 #include "osd_types.h"
 
+// objcet_info_t 的内存版
 struct ObjectState {
   object_info_t oi;
   bool exists;         ///< the stored object exists (i.e., we will remember the object_info_t)

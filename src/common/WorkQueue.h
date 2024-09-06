@@ -44,13 +44,13 @@ struct ThreadPool {
 class ThreadPool : public md_config_obs_t {
 protected:
   CephContext *cct;
-  std::string name;
+  std::string name;		  // 线程池的名字
   std::string thread_name;
-  std::string lockname;
-  ceph::mutex _lock;
-  ceph::condition_variable _cond;
-  bool _stop;
-  int _pause;
+  std::string lockname;		  // 锁的名字
+  ceph::mutex _lock;		  // 线程互斥的锁，也是工作队列访问的互斥锁
+  ceph::condition_variable _cond; // 锁对应的条件变量
+  bool _stop;			  // 线程池是否停止的标志
+  int _pause;			  // 暂时中止线程池的标志
   int _draining;
   ceph::condition_variable _wait_cond;
 
@@ -388,7 +388,7 @@ public:
     uint32_t m_processing;
   };
 protected:
-  std::vector<WorkQueue_*> work_queues;
+  std::vector<WorkQueue_*> work_queues;	// 工作队列
   int next_work_queue = 0;
  
 
@@ -403,8 +403,8 @@ protected:
     }
   };
   
-  std::set<WorkThread*> _threads;
-  std::list<WorkThread*> _old_threads;  ///< need to be joined
+  std::set<WorkThread*> _threads;	// 线程池中的工作线程
+  std::list<WorkThread*> _old_threads;  // 等待进 joined 操作的线程
   int processing;
 
   void start_threads();

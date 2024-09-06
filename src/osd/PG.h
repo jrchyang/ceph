@@ -172,6 +172,10 @@ private:
   ScrubberPasskey& operator=(const ScrubberPasskey&) = delete;
 };
 
+/**
+ * 处理 PG 相关的状态维护以及实现 PG 层面的基本功能
+ * 其核心功能是用 boost 库的 statechart 状态机来实现的 PG 状态转换
+ */
 class PG : public DoutPrefixProvider, public PeeringState::PeeringListener {
   friend struct NamedState;
   friend class PeeringState;
@@ -1073,24 +1077,33 @@ protected:
   // ops with newer maps than our (or blocked behind them)
   // track these by client, since inter-request ordering doesn't otherwise
   // matter.
+  // 1. 收到 op 时，之前已经有来自同一个客户端的 op 已经存在于队列之中（同一个客户端的 op 必须要顺序处理）
+  // 2. op 携带的 Epoch 大于 PG 当前的 Epoch
   std::unordered_map<entity_name_t,std::list<OpRequestRef>> waiting_for_map;
 
   // ops waiting on peered
+  // PG 状态不是 Peered 或者 Active 状态（例如 PG 出于 Down 或者 Incomplete 状态）
   std::list<OpRequestRef>            waiting_for_peered;
 
   /// ops waiting on readble
   std::list<OpRequestRef>            waiting_for_readable;
 
   // ops waiting on active (require peered as well)
+  // PG 状态不是 Active 状态（例如 PG 处于 Peered 状态）
   std::list<OpRequestRef>            waiting_for_active;
   std::list<OpRequestRef>            waiting_for_flush;
+  // op 操作的对象正在被 scrub
+  // 注意：因为 PG 能够执行 scrub 的前提是 PG 处于 Active+Clean 状态
+  //      所以 PG 总是最后检查此队列
   std::list<OpRequestRef>            waiting_for_scrub;
 
   std::list<OpRequestRef>            waiting_for_cache_not_full;
   std::list<OpRequestRef>            waiting_for_clean_to_primary_repair;
-  std::map<hobject_t, std::list<OpRequestRef>> waiting_for_unreadable_object,
-			     waiting_for_degraded_object,
-			     waiting_for_blocked_object;
+  // op 操作的本地对象待修复（指对象位于当前 PG 实例的 missing 列表之中）
+  std::map<hobject_t, std::list<OpRequestRef>> waiting_for_unreadable_object;
+  // op 操作的对象出于降级状态（指对象位于 Primary 的 missing 列表之中）
+  std::map<hobject_t, std::list<OpRequestRef>> waiting_for_degraded_object;
+  std::map<hobject_t, std::list<OpRequestRef>> waiting_for_blocked_object;
 
   std::set<hobject_t> objects_blocked_on_cache_full;
   std::map<hobject_t,snapid_t> objects_blocked_on_degraded_snap;

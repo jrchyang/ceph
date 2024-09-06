@@ -90,6 +90,10 @@ struct Interceptor {
 
 #endif
 
+/**
+ * 整个网络模块的抽象，定义了网络模块的基本 API 接口
+ * 网络模块对外提供的基本功能，就是能在节点之间发送和接收消息
+ */
 class Messenger {
 private:
   std::deque<Dispatcher*> dispatchers;

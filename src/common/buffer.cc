@@ -132,6 +132,7 @@ static ceph::spinlock debug_lock;
     }
   };
 
+  // 实现了用 malloc 函数分配内存空间的功能
   class buffer::raw_malloc : public buffer::raw {
   public:
     MEMPOOL_CLASS_HELPERS();
@@ -159,6 +160,7 @@ static ceph::spinlock debug_lock;
   };
 
 #ifndef __CYGWIN__
+  // 调用了了函数 posix_memalign 申请内存地址对齐的内存空间
   class buffer::raw_posix_aligned : public buffer::raw {
     unsigned align;
   public:
@@ -218,6 +220,7 @@ static ceph::spinlock debug_lock;
 
   /*
    * primitive buffer types
+   * 使用了 C++ 的 new 操作符来申请内存空间
    */
   class buffer::raw_char : public buffer::raw {
   public:

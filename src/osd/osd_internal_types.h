@@ -15,12 +15,15 @@
   * replicas ack.
   */
 
+// SnapSet 的内存版本，主要增加了引用计数机制，便于 SS 属性在 head 对象、克隆对象以及
+// snapdir 对象之间共享
 struct SnapSetContext {
-  hobject_t oid;
-  SnapSet snapset;
-  int ref;
-  bool registered : 1;
-  bool exists : 1;
+  hobject_t oid;	// 对象关联的 snapdir 对象标识
+  SnapSet snapset;	// SS 属性
+  int ref;		// 引用计数，SnapSetContext 可能被同一个对象的多个相关对象
+			// （head 对象、克隆对象、snapdir 对象）关联
+  bool registered : 1;	// 是否已经将 SnapSetContext 加入缓存
+  bool exists : 1;	// 指示 SnapSet 是否存在
 
   explicit SnapSetContext(const hobject_t& o) :
     oid(o), ref(0), registered(false), exists(true) { }
@@ -28,9 +31,19 @@ struct SnapSetContext {
 struct ObjectContext;
 typedef std::shared_ptr<ObjectContext> ObjectContextRef;
 
+/**
+ * 对象上下文保存了对象的 OI 和 SS 属性，此外，内部实现了一个属性缓存（主要用于缓存用户自定义
+ * 属性对）和读写互斥锁机制，用于对来自客户端的 op 进行保序
+ *
+ * op 操作对象之前，必须先获取对象上下文；在进行读写之前，则必须获得对象上下文的读锁（对应
+ * op 仅包含读操作）或者写操作（对应 op 包含写操作）
+ *
+ * 原则上，op_shardedwq 的实现原理可用于对访问同一个 PG 的 op 进行保序，但是由于写是异步的
+ * （纠删码存储池的读也是异步的），即写操作在执行过程如果遇到堵塞会让出 CPU，所以需要在对象
+ * 上下文中额外引入一套读写锁互斥锁机制来对 op 进行保序
+ */
 struct ObjectContext {
-  ObjectState obs;
-
+  ObjectState obs;	// 对象状态
   SnapSetContext *ssc;  // may be null
 
   Context *destructor_callback;
@@ -41,8 +54,22 @@ public:
   std::map<std::pair<uint64_t, entity_name_t>, WatchRef> watchers;
 
   // attr cache
+  // 属性（指用户自定义属性）缓存
   std::map<std::string, ceph::buffer::list, std::less<>> attr_cache;
 
+  /**
+   * 读写锁，用于对来自客户端的 op 进行排队，以保证数据一致性
+   * 共有三种类型：RWREAD、RWWRITE、RWEXCL
+   * 与常见的读写锁实现逻辑不同，上述三种类型中，只有 RWEXCL 是真正的互斥锁，其他两种都可以
+   *   被重复加锁（RWWRITE 也可以被强制重复加锁）
+   * rwstate 内部维护了一个 op 等待队列，如果加锁失败，对应的 op 会进入等待队列进行等待，
+   *   被唤醒后，按入队顺序以此重试以获取所请求类型的锁
+   * 注意：除上述读写锁之外，为了防止 Ceph 内部诸如 Cache Tier、Recovery/Backfill 等
+   *   机制产生的本地读写请求（这类请求不会创建 OpContext。事实上，如果对应的对象处于
+   *   Recovery/Backfill 过程之中，相应的客户端请求会被阻塞）与客户端产生的（分布式）读写
+   *   请求产生冲突，ObjectContext 还实现了另一套读写互斥锁，成为 ondisk_read/write_lock
+   *   供 PG 访问本地数据时使用
+   */
   RWState rwstate;
   std::list<OpRequestRef> waiters;  ///< ops waiting on state change
   bool get_read(OpRequestRef& op) {

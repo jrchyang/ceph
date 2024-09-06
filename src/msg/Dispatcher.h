@@ -27,6 +27,10 @@ class Connection;
 class CryptoKey;
 class KeyStore;
 
+/**
+ * Server 端注册该 Dispatcher 类用于把接收到的 Message 请求分发给具体处理的应用层
+ * Client 端需要实现一个 Dispatcher 函数用于处理收到的 ACK 应对消息
+ */
 class Dispatcher {
 public:
   explicit Dispatcher(CephContext *cct_)
