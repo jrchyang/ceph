@@ -78,6 +78,7 @@ void ThreadPool::handle_conf_change(const ConfigProxy& conf,
   }
 }
 
+// 线程池的执行函数
 void ThreadPool::worker(WorkThread *wt)
 {
   std::unique_lock ul(_lock);
@@ -87,10 +88,14 @@ void ThreadPool::worker(WorkThread *wt)
   ss << name << " thread " << (void *)pthread_self();
   auto hb = cct->get_heartbeat_map()->add_worker(ss.str(), pthread_self());
 
+  // 检查标记，确保线程池没有关闭
   while (!_stop) {
 
     // manage dynamic thread pool
+    // 等待旧的工作线程结束
     join_old_threads();
+    // 如果线程数量大于配置的数量，则把当前线程从线程集合中删除，
+    // 并加入 _old_threads 队列中，并退出循环
     if (_threads.size() > _num_threads) {
       ldout(cct,1) << " worker shutting down; too many threads (" << _threads.size() << " > " << _num_threads << ")" << dendl;
       _threads.erase(wt);
@@ -98,16 +103,18 @@ void ThreadPool::worker(WorkThread *wt)
       break;
     }
 
+    // 如果工作队列为空则进入条件变量等待
     if (work_queues.empty()) {
       ldout(cct, 10) << "worker no work queues" << dendl;
-    } else if (!_pause) {
+    } else if (!_pause) { // 线程池没有暂停则执行相关工作
       WorkQueue_* wq;
       int tries = 2 * work_queues.size();
       bool did = false;
       while (tries--) {
+	// 从上一个工作队列开始遍历
 	next_work_queue %= work_queues.size();
 	wq = work_queues[next_work_queue++];
-	
+	// 获取任务
 	void *item = wq->_void_dequeue();
 	if (item) {
 	  processing++;
@@ -116,6 +123,7 @@ void ThreadPool::worker(WorkThread *wt)
 	  ul.unlock();
 	  TPHandle tp_handle(cct, hb, wq->timeout_interval, wq->suicide_interval);
 	  tp_handle.reset_tp_timeout();
+	  // 调用工作队列的处理函数进行处理
 	  wq->_void_process(item, tp_handle);
 	  ul.lock();
 	  wq->_void_process_finish(item);
@@ -178,6 +186,7 @@ void ThreadPool::start()
     cct->_conf.add_observer(this);
   }
 
+  // 启动线程
   _lock.lock();
   start_threads();
   _lock.unlock();

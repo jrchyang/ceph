@@ -162,9 +162,12 @@ inline std::ostream& operator<<(std::ostream& out, const snapid_t& s) {
 
 
 // snap object
+// 用于标识是否是快照对象
+// 数据成员 snap 为快照对象的对应的快照序号
+// 当对象不是快照对象（也就是 head 对象），那么该字段被设置为 CEPH_NOSNAP
 struct sobject_t {
   object_t oid;
-  snapid_t snap; // 当对象不是快照对象（也就是 head 对象），那么该字段被设置为 CEPH_NOSNAP
+  snapid_t snap;
 
   sobject_t() : snap(0) {}
   sobject_t(object_t o, snapid_t s) : oid(o), snap(s) {}

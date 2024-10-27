@@ -33,9 +33,11 @@ class Throttle final : public ThrottleInterface {
   CephContext *cct;
   const std::string name;
   PerfCountersRef logger;
+  // count - 当前占用的 slot 数量
+  // max   - slot 的最大数量
   std::atomic<int64_t> count = { 0 }, max = { 0 };
-  std::mutex lock;
-  std::list<std::condition_variable> conds;
+  std::mutex lock; // 等待的锁
+  std::list<std::condition_variable> conds; // 等待的条件变量
   const bool use_perf;
 
 public:

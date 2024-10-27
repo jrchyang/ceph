@@ -484,6 +484,8 @@ void ReplicatedBackend::submit_transaction(
   ObjectStore::Transaction op_t;
   PGTransactionUPtr t(std::move(_t));
   set<hobject_t> added, removed;
+
+  // 将 PGTransaction 对象封装到 ObjectStore::Transaction 中
   generate_transaction(
     t,
     coll,
@@ -495,6 +497,7 @@ void ReplicatedBackend::submit_transaction(
   ceph_assert(added.size() <= 1);
   ceph_assert(removed.size() <= 1);
 
+  // 生成一个新的代表当前操作对象的 InProgressOp
   auto insert_res = in_progress_ops.insert(
     make_pair(
       tid,
@@ -511,10 +514,12 @@ void ReplicatedBackend::submit_transaction(
     span = tracing::osd::tracer.add_span("ReplicatedBackend::submit_transaction", orig_op->osd_parent_span);
   }
 
+  // 记录当前操作需要等待哪些 OSD 返回结果，包含本地 OSD 和远端 OSD
   op.waiting_for_commit.insert(
     parent->get_acting_recovery_backfill_shards().begin(),
     parent->get_acting_recovery_backfill_shards().end());
 
+  // 对于发往远端 OSD 的复本请求，通过网络发送 CEPH_MSG_REPOP 消息
   issue_op(
     soid,
     at_version,
@@ -543,11 +548,13 @@ void ReplicatedBackend::submit_transaction(
   
   op_t.register_on_commit(
     parent->bless_context(
-      new C_OSD_OnOpCommit(this, &op)));
+      new C_OSD_OnOpCommit(this, &op))); // 提交到日志区之后触发
 
+  // 再将事务发送给后端存储池进行处理
   vector<ObjectStore::Transaction> tls;
   tls.push_back(std::move(op_t));
 
+  // 最终会调用不同 ObjectStore 的 queue_transactions 函数
   parent->queue_transactions(tls, op.op);
   if (at_version != eversion_t()) {
     parent->op_applied(at_version);

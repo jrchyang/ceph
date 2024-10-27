@@ -7380,6 +7380,7 @@ void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRe
 {
   ceph_assert(ceph_mutex_is_locked(session->session_dispatch_lock));
 
+  // 遍历 session 中 waiting_on_map 中的每个 op 进行处理
   auto i = session->waiting_on_map.begin();
   while (i != session->waiting_on_map.end()) {
     OpRequestRef op = &(*i);
@@ -7395,6 +7396,7 @@ void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRe
 
     spg_t pgid;
     if (m->get_type() == CEPH_MSG_OSD_OP) {
+      // 根据消息中记录的 pg (对象名称的 hash 值) 计算实际 pg (根据 pg 数取余)
       pg_t actual_pgid = osdmap->raw_pg_to_pg(
 	static_cast<const MOSDOp*>(m)->get_pg());
       if (!osdmap->get_primary_shard(actual_pgid, &pgid)) {
@@ -7403,6 +7405,7 @@ void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRe
     } else {
       pgid = m->get_spg();
     }
+    // 依据实际 pgid 将消息放入片式队列
     enqueue_op(pgid, std::move(op), m->get_map_epoch());
   }
 
@@ -7413,12 +7416,27 @@ void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRe
   }
 }
 
+/**
+ * 1. 首先检查 service，如果已经停止了，就直接返回
+ * 2. 调用函数 op_tracker.create_request 把 Message 消息转换为 OpReuqest 类型，
+ *    数据结构 OpRequest 包装了 Message，并添加了一些其他信息
+ * 3. 获取 nextmap（也就是最新的 osdmap）和 session，类 Session 保存了一个 Connection 的相关信息
+ * 4. 调用函数 update_waiting_for_pg 来更新 session 里保存的 OSDMap 信息
+ * 5. 把请求加入 waiting_on_map 的列表里
+ * 6. 调用函数 dispatch_session_waiting 处理，它循环调用函数 dispatch_op_fast 处理请求
+ * 7. 如果 seeesion->waiting_on_map 不为空，说明该 session 里还有等待 osdmap 的请求，
+ *    把该 session 加入到 session_waiting_for_map 队列里
+ */
 void OSD::ms_fast_dispatch(Message *m)
 {
+  dout(20) << "get message type " << m->get_type()
+	   << " from " << m->get_source() << dendl;
+
   auto dispatch_span = tracing::osd::tracer.start_trace(__func__);
   FUNCTRACE(cct);
+  // 检查服务状态
   if (service.is_stopping()) {
-    m->put();
+    m->put();	// 释放消息
     return;
   }
   // peering event?
@@ -7463,7 +7481,7 @@ void OSD::ms_fast_dispatch(Message *m)
     }
   }
 
-  // 根据 Message 创建 op
+  // 根据 Message 创建 OpRequest
   OpRequestRef op = op_tracker.create_request<OpRequest, Message*>(m);
   {
 #ifdef WITH_LTTNG
@@ -7482,11 +7500,13 @@ void OSD::ms_fast_dispatch(Message *m)
   op->min_epoch = static_cast<MOSDFastDispatchOp*>(m)->get_min_epoch();
   ceph_assert(op->min_epoch <= op->sent_epoch); // sanity check!
 
+  // 调试使用增加延迟
   service.maybe_inject_dispatch_delay();
 
   if (m->get_connection()->has_features(CEPH_FEATUREMASK_RESEND_ON_SPLIT) ||
       m->get_type() != CEPH_MSG_OSD_OP) {
     // queue it directly
+    dout(20) << "op " << op << " enqueue directly" << dendl;
     enqueue_op(
       static_cast<MOSDFastDispatchOp*>(m)->get_spg(),
       std::move(op),
@@ -7495,8 +7515,11 @@ void OSD::ms_fast_dispatch(Message *m)
     // legacy client, and this is an MOSDOp (the *only* fast dispatch
     // message that didn't have an explicit spg_t); we need to map
     // them to an spg_t while preserving delivery order.
+    dout(20) << "op " << op << " enqueue not directly" << dendl;
     auto priv = m->get_connection()->get_priv();
+    // 将 op 放入当前连接的会话上下文中，待获取到 OSDMap 后进行处理
     if (auto session = static_cast<Session*>(priv.get()); session) {
+      dout(20) << "op " << op << " waiting on map" << dendl;
       std::lock_guard l{session->session_dispatch_lock};
       op->get();
       // 将 op 加入到 session 内部的 waiting_on_map 队列
@@ -9985,16 +10008,19 @@ void OSD::dequeue_op(
 
   logger->tinc(l_osd_op_before_dequeue_op_lat, latency);
 
+  // 检查是否需要更新 osdmap
   service.maybe_share_map(m->get_connection().get(),
 			  pg->get_osdmap(),
 			  op->sent_epoch);
 
+  // 如果 pg 正在删除就把本请求丢弃直接返回
   if (pg->is_deleting())
     return;
 
   op->mark_reached_pg();
   op->osd_trace.event("dequeue_op");
 
+  // 处理请求
   pg->do_request(op, handle);
 
   // finish
@@ -11097,6 +11123,7 @@ void OSD::ShardedOpWQ::_add_slot_waiter(
 
 void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
 {
+  // 通过线程号取余的方式找到每个线程片时的分片，可能存在两个线程处理一个分片的情况
   uint32_t shard_index = thread_index % osd->num_shards;
   auto& sdata = osd->shards[shard_index];
   ceph_assert(sdata);
@@ -11159,6 +11186,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
       return;
     }
 
+    // 取出一个操作对象到 item
     work_item = sdata->scheduler->dequeue();
     if (osd->is_stopping()) {
       sdata->shard_lock.unlock();
@@ -11290,6 +11318,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
 				 suicide_interval);
 
   // take next item
+  // 对于查找到的 pg 对象会放入一个临时的 slot 结构中进行同步加锁
   auto qi = std::move(slot->to_process.front());
   slot->to_process.pop_front();
   dout(20) << __func__ << " " << qi << " pg " << pg << dendl;
@@ -11417,6 +11446,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
   delete f;
   *_dout << dendl;
 
+  // 调用实际的处理函数，最终将执行 PrimaryLogPG::do_request()
   qi.run(osd, sdata, pg, tp_handle);
 
   {

@@ -1798,6 +1798,8 @@ void PrimaryLogPG::do_request(
   OpRequestRef& op,
   ThreadPool::TPHandle &handle)
 {
+  dout(20) << "PrimaryLogPG processing op : " << op << dendl;
+
   if (op->osd_trace) {
     op->pg_trace.init("pg op", &trace_endpoint, &op->osd_trace);
     op->pg_trace.event("do request");
@@ -1869,6 +1871,7 @@ void PrimaryLogPG::do_request(
     }
   }
 
+  // 如果 pg 还没有 peered
   if (!is_peered()) {
     // Delay unless PGBackend says it's ok
     if (pgbackend->can_handle_while_inactive(op)) {
@@ -1896,6 +1899,7 @@ void PrimaryLogPG::do_request(
   switch (msg_type) {
   case CEPH_MSG_OSD_OP:
   case CEPH_MSG_OSD_BACKOFF:
+    // 如果处于非 active 状态则将请求加入到 waiting_for_active 队列中
     if (!is_active()) {
       dout(20) << " peered, not active, waiting for active on " << op << dendl;
       waiting_for_active.push_back(op);
@@ -1905,6 +1909,7 @@ void PrimaryLogPG::do_request(
     switch (msg_type) {
     case CEPH_MSG_OSD_OP:
       // verify client features
+      // 如果是写入 cache pool 的请求但该 pool 不是 cache pool 则返回异常
       if ((pool.info.has_tiers() || pool.info.is_tier()) &&
 	  !op->has_feature(CEPH_FEATURE_OSD_CACHEPOOL)) {
 	osd->reply_op_error(op, -EOPNOTSUPP);
@@ -1987,6 +1992,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   // change anything that will break other reads on m (operator<<).
   MOSDOp *m = static_cast<MOSDOp*>(op->get_nonconst_req());
   ceph_assert(m->get_type() == CEPH_MSG_OSD_OP);
+  // 把消息带的数据从 bufferlist 中解析出相关的字段
   if (m->finish_decode()) {
     op->reset_desc();   // for TrackedOp
     m->clear_payload();
@@ -2058,6 +2064,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     return;
   }
 
+  // 检查是否有相关的操作权限
   if (!op_has_sufficient_caps(op)) {
     osd->reply_op_error(op, -EPERM);
     return;
@@ -2067,7 +2074,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     return do_pg_op(op);
   }
 
-  // object name too long?
+  // 检查对象的名字是否超长
   if (m->get_oid().name.size() > cct->_conf->osd_max_object_name_len) {
     dout(4) << "do_op name is longer than "
 	    << cct->_conf->osd_max_object_name_len
@@ -2102,7 +2109,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     return;
   }
 
-  // blocklisted?
+  // 客户端是否在黑名单中
   if (get_osdmap()->is_blocklisted(m->get_source_addr())) {
     dout(10) << "do_op " << m->get_source_addr() << " is blocklisted" << dendl;
     osd->reply_op_error(op, -EBLOCKLISTED);
@@ -2270,6 +2277,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     }
   }
 
+  // 在当前 PG 中查找或生成一个新的对象上下文，用来保存对象修改的相关信息
   ObjectContextRef obc;
   bool can_create = op->may_write();
   hobject_t missing_oid;
@@ -2433,7 +2441,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   }
 
   dout(25) << __func__ << " oi " << obc->obs.oi << dendl;
-
+  // 生成一个新 op 上下文
   OpContext *ctx = new OpContext(op, m->get_reqid(), &m->ops, obc, this);
 
   if (m->has_flag(CEPH_OSD_FLAG_SKIPRWLOCKS)) {
@@ -2498,6 +2506,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
 
   op->mark_started();
 
+  // 执行该 op 上下文
   execute_ctx(ctx);
   utime_t prepare_latency = ceph_clock_now();
   prepare_latency -= op->get_dequeued_time();
@@ -4142,9 +4151,13 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
   dout(10) << __func__ << " " << ctx << dendl;
   ctx->reset_obs(ctx->obc);
   ctx->update_log_only = false; // reset in case finish_copyfrom() is re-running execute_ctx
+  // 上下文上包含的 op
   OpRequestRef op = ctx->op;
+  // op 对应的原始请求消息
   auto m = op->get_req<MOSDOp>();
+  // op 操作的对象上下文
   ObjectContextRef obc = ctx->obc;
+  // 对象 id
   const hobject_t& soid = obc->obs.oi.soid;
 
   // this method must be idempotent since we may call it several times
@@ -4201,6 +4214,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
 
   [[maybe_unused]] auto span = tracing::osd::tracer.add_span(__func__, ctx->op->osd_parent_span);
 
+  // 将上下文中的多个子操作放入到事务中，普通读写只有一个子操作
   int result = prepare_transaction(ctx);
 
   {
@@ -4257,6 +4271,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
 	   << " result " << result << dendl;
 
   // read or error?
+  // 对于读操作，在 prepare_transaction 中将完成对象的读取，这里将直接返回响应消息给客户端
   if ((ctx->op_t->empty() || result < 0) && !ctx->update_log_only) {
     // finish side-effects
     if (result >= 0)
@@ -4265,6 +4280,8 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     complete_read_ctx(result, ctx);
     return;
   }
+
+  // 以下均针对写操作
 
   ctx->reply->set_reply_versions(ctx->at_version, ctx->user_at_version);
 
@@ -4317,6 +4334,7 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
 
   // no need to capture PG ref, repop cancel will handle that
   // Can capture the ctx by pointer, it's owned by the repop
+  // 注册所有复本写操作均完成后的回调函数，该函数将发送响应给客户端
   ctx->register_on_commit(
     [m, ctx, this](){
       if (ctx->op)
@@ -4345,6 +4363,8 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     });
 
   // issue replica writes
+  // 生成一组复本操作，并将这些操作发射出去：本地复本将写到后端 ObjectStore，
+  // 远端复本将通过网络消息发送并等待响应
   ceph_tid_t rep_tid = osd->get_tid();
 
   RepGather *repop = new_repop(ctx, rep_tid);
@@ -5834,6 +5854,7 @@ int PrimaryLogPG::do_read(OpContext *ctx, OSDOp& osd_op) {
     ctx->op_finishers[ctx->current_osd_subop_num].reset(
       new ReadFinisher(osd_op));
   } else {
+    // 针对读请求，通过后端同步读接口直接读取对象内容
     int r = pgbackend->objects_read_sync(
       soid, op.extent.offset, op.extent.length, op.flags, &osd_op.outdata);
     // whole object?  can we verify the checksum?
@@ -5982,6 +6003,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     span = tracing::osd::tracer.add_span(__func__, ctx->op->osd_parent_span);
   }
   ctx->current_osd_subop_num = 0;
+  // 循环处理每个子操作
   for (auto p = ops.begin(); p != ops.end(); ++p, ctx->current_osd_subop_num++, ctx->processed_subop_count++) {
     OSDOp& osd_op = *p;
     ceph_osd_op& op = osd_op.op;
@@ -11417,6 +11439,7 @@ void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
     ctx->op_t->add_obc(ctx->head_obc);
   }
 
+  // 生成复本操作全部完成后的回调对象
   Context *on_all_commit = new C_OSD_RepopCommit(this, repop);
   if (!(ctx->log.empty())) {
     ceph_assert(ctx->at_version >= projected_last_update);
@@ -11430,6 +11453,7 @@ void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
     soid,
     ctx->log,
     ctx->at_version);
+  // 递交给 ReplicatedBackend 对象处理
   pgbackend->submit_transaction(
     soid,
     ctx->delta_stats,

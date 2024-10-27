@@ -243,7 +243,8 @@
 // ======================================================
 
 // abstract Message class
-
+// 所有消息的基类，任何要发送的消息都要继承该类
+// | header | user_data | footer |
 class Message : public RefCountedObject {
 public:
 #ifdef WITH_SEASTAR

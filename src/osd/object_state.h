@@ -8,7 +8,10 @@
 // objcet_info_t 的内存版
 struct ObjectState {
   object_info_t oi;
-  bool exists;         ///< the stored object exists (i.e., we will remember the object_info_t)
+  bool exists;		///< the stored object exists (i.e., we will remember the object_info_t)
+			// 指示关联的对象是否存在，为什么需要这样一个额外的标记呢？
+			// 因为 object_info_t 可能是从缓存的 attr[IO_ATTR] 中获取的，
+			// 并不能确定对象是否存在
 
   ObjectState() : exists(false) {}
 

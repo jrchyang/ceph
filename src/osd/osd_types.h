@@ -543,6 +543,7 @@ namespace std {
 struct spg_t {
   pg_t pgid;
   shard_id_t shard; // 代表该 PG 所在的 OSD 在对应的 OSD 列表中的序号
+		    // EC 模式下该字段保存了每个分片的序号
   spg_t() : shard(shard_id_t::NO_SHARD) {}
   spg_t(pg_t pgid, shard_id_t shard) : pgid(pgid), shard(shard) {}
   explicit spg_t(pg_t pgid) : pgid(pgid), shard(shard_id_t::NO_SHARD) {}
@@ -4131,9 +4132,9 @@ std::ostream& operator<<(std::ostream& out, const ObjectCleanRegions& ocr);
 
 
 struct OSDOp {
-  ceph_osd_op op;			// 各种操作码和操作参数
-  sobject_t soid;			// 操作对象
-
+  ceph_osd_op op;	// 具体操作数据的封装
+  sobject_t soid;	// src oid，并不是 op 操作的对象，而是源操作对象
+			// 例如 rados_clone_range 需要目标 obj 和源 obj
   ceph::buffer::list indata, outdata;	// 输入和输出 bufferlist
   errorcode32_t rval = 0;		// 操作结果
 
@@ -5905,8 +5906,9 @@ struct object_info_t {
     FLAG_REDIRECT_HAS_REFERENCE = 1<<9, // has reference
   } flag_t;
 
-  flag_t flags;	// FLAG_DATA_DIGEST/FLAG_OMAP/FLAG_OMAP_DIGEST 用于指示对象当前是否包含数据校验和、
-		// 是否使用了 omap、是否包含 omap 校验和
+  flag_t flags;	// FLAG_DATA_DIGEST 对象当前是否包含数据校验和
+		// FLAG_OMAP 对象当前是否使用了 omap
+		// FLAG_OMAP_DIGEST 对象当前是否包含 omap 校验和
 
   static std::string get_flag_string(flag_t flags) {
     std::string s;

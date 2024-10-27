@@ -125,17 +125,19 @@ private:
 };
 
 
-
+/**
+ * 该类是 Connection 相关的一个类，用于保存 Connection 相关的上下文相关的信息
+ */
 struct Session : public RefCountedObject {
-  EntityName entity_name;
+  EntityName entity_name;	// peer 实例的名字
   OSDCap caps;
-  ConnectionRef con;
+  ConnectionRef con;		// 相关的 Connection
   entity_addr_t socket_addr;
   WatchConState wstate;
 
   ceph::mutex session_dispatch_lock =
     ceph::make_mutex("Session::session_dispatch_lock");
-  boost::intrusive::list<OpRequest> waiting_on_map;
+  boost::intrusive::list<OpRequest> waiting_on_map;	// 所有的 OpRequest 请求都先添加到这个队列中
 
   ceph::spinlock sent_epoch_lock;
   epoch_t last_sent_epoch = 0;

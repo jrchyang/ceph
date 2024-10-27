@@ -59,7 +59,9 @@ public:
     friend class ThreadPool;
     CephContext *cct;
     ceph::heartbeat_handle_d *hb;
+    // 超时时间，当线程执行时间超过该时间，就认为是 unhealthy 状态
     ceph::timespan grace;
+    // 超时时间，当线程执行时间超过该时间，OSD 就会产生断言而导致自杀
     ceph::timespan suicide_grace;
   public:
     TPHandle(
@@ -566,6 +568,7 @@ private:
   ceph::unordered_map<Context*, int> m_context_results;
 };
 
+// 用于处理需要顺序执行的任务
 class ShardedThreadPool {
 
   CephContext *cct;

@@ -345,7 +345,16 @@ struct PGTempMap {
 };
 WRITE_CLASS_ENCODER(PGTempMap)
 
-/** OSDMap
+/*
+ * OSDMap
+ * 定义了 Ceph 整个集群的全局信息，由 Monitor 实现管理，并以全量或者增量的方式向整个集群扩散。
+ * 每个 epoch 对应的 OSDMap 都需要持久化保存在 meta 下对应对象的 omap 属性中
+ *
+ * 基本包含了以下四类信息：
+ *   1. 集群信息
+ *   2. pool 相关的信息
+ *   3. 临时 pg 相关的信息
+ *   4. osd 的所有状态
  */
 class OSDMap {
 public:
@@ -358,9 +367,10 @@ public:
     /// feature bits we were encoded with.  the subsequent OSDMap
     /// encoding should match.
     uint64_t encode_features;
-    uuid_d fsid;
-    epoch_t epoch;   // new epoch; we are a diff from epoch-1 to epoch
-    utime_t modified;
+    uuid_d fsid;	// 当前集群的 fsid 值
+    epoch_t epoch;	// new epoch; we are a diff from epoch-1 to epoch
+			// 当前集群的 epoch 值
+    utime_t modified;	// 修改的时间戳
     int64_t new_pool_max; //incremented by the OSDMonitor on each pool create
     int32_t new_flags;
     ceph_release_t new_require_osd_release{0xff};
@@ -519,19 +529,20 @@ public:
   };
   
 private:
-  uuid_d fsid;
-  epoch_t epoch;        // what epoch of the osd cluster descriptor is this
-  utime_t created, modified; // epoch start time
-  int32_t pool_max;     // the largest pool num, ever
 
-  uint32_t flags;
+  // 系统相关的信息
+  uuid_d fsid;			// 当前集群的 fsid 值
+  epoch_t epoch;		// 当前集群的 epoch 值 - what epoch of the osd cluster descriptor is this
+  utime_t created, modified;	// 创建修改的时间戳
+  int32_t pool_max;		// 最大 pool 数量
+  uint32_t flags;		// 一些标记
 
-  int num_osd;         // not saved; see calc_num_osds
-  int num_up_osd;      // not saved; see calc_num_osds
-  int num_in_osd;      // not saved; see calc_num_osds
-
-  int32_t max_osd;
-  std::vector<uint32_t> osd_state;
+  // OSD 相关的信息
+  int num_osd;		// OSD 的总数量 - not saved; see calc_num_osds
+  int num_up_osd;	// 处于 up 状态的 OSD 数量 - not saved; see calc_num_osds
+  int num_in_osd;	// 处于 in 状态的 OSD 数量 - not saved; see calc_num_osds
+  int32_t max_osd;	// OSD 的最大数目
+  std::vector<uint32_t> osd_state;	// OSD 的状态
 
   mempool::osdmap::map<int32_t,uint32_t> crush_node_flags; // crush node -> CEPH_OSD_* flags
   mempool::osdmap::map<int32_t,uint32_t> device_class_flags; // device class -> CEPH_OSD_* flags
@@ -562,12 +573,16 @@ private:
     mempool::osdmap::vector<std::shared_ptr<entity_addrvec_t> > hb_back_addrs;
     mempool::osdmap::vector<std::shared_ptr<entity_addrvec_t> > hb_front_addrs;
   };
-  std::shared_ptr<addrs_s> osd_addrs;
+  std::shared_ptr<addrs_s> osd_addrs;	// OSD 的地址
 
   entity_addrvec_t _blank_addrvec;
 
-  mempool::osdmap::vector<__u32>   osd_weight;   // 16.16 fixed point, 0x10000 = "in", 0 = "out"
-  mempool::osdmap::vector<osd_info_t> osd_info;
+  mempool::osdmap::vector<__u32>   osd_weight;	// OSD 的权重 - 16.16 fixed point, 0x10000 = "in", 0 = "out"
+  mempool::osdmap::vector<osd_info_t> osd_info;	// OSD 的基本信息
+  std::shared_ptr< mempool::osdmap::vector<uuid_d> > osd_uuid;	// OSD 对应的 uuid
+  mempool::osdmap::vector<osd_xinfo_t> osd_xinfo;		// OSD 的一些扩展信息
+
+  // PG 相关的信息
   std::shared_ptr<PGTempMap> pg_temp;  // temp pg mapping (e.g. while we rebuild)
   std::shared_ptr< mempool::osdmap::map<pg_t,int32_t > > primary_temp;  // temp primary mapping (e.g. while we rebuild)
   std::shared_ptr< mempool::osdmap::vector<__u32> > osd_primary_affinity; ///< 16.16 fixed point, 0x10000 = baseline
@@ -576,13 +591,11 @@ private:
   mempool::osdmap::map<pg_t,mempool::osdmap::vector<int32_t>> pg_upmap; ///< remap pg
   mempool::osdmap::map<pg_t,mempool::osdmap::vector<std::pair<int32_t,int32_t>>> pg_upmap_items; ///< remap osds in up set
 
-  mempool::osdmap::map<int64_t,pg_pool_t> pools;
-  mempool::osdmap::map<int64_t,std::string> pool_name;
-  mempool::osdmap::map<std::string, std::map<std::string,std::string>> erasure_code_profiles;
-  mempool::osdmap::map<std::string,int64_t, std::less<>> name_pool;
-
-  std::shared_ptr< mempool::osdmap::vector<uuid_d> > osd_uuid;
-  mempool::osdmap::vector<osd_xinfo_t> osd_xinfo;
+  // pool 相关信息
+  mempool::osdmap::map<int64_t,pg_pool_t> pools;	// pool 的 id 到类 pg_pool_t 的映射
+  mempool::osdmap::map<int64_t,std::string> pool_name;	// pool 的 id 到 pool 的名字的映射
+  mempool::osdmap::map<std::string, std::map<std::string,std::string>> erasure_code_profiles;	// pool 的 ec 相关的信息
+  mempool::osdmap::map<std::string,int64_t, std::less<>> name_pool;	// pool 的名字到 pool 的 id 的映射
 
   class range_bits {
     struct ip6 {
@@ -662,9 +675,9 @@ private:
 	     num_osd(0), num_up_osd(0), num_in_osd(0),
 	     max_osd(0),
 	     osd_addrs(std::make_shared<addrs_s>()),
+	     osd_uuid(std::make_shared<mempool::osdmap::vector<uuid_d>>()),
 	     pg_temp(std::make_shared<PGTempMap>()),
 	     primary_temp(std::make_shared<mempool::osdmap::map<pg_t,int32_t>>()),
-	     osd_uuid(std::make_shared<mempool::osdmap::vector<uuid_d>>()),
 	     cluster_snapshot_epoch(0),
 	     new_blocklist_entries(false),
 	     cached_up_osd_features(0),

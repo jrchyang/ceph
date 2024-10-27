@@ -399,11 +399,12 @@ public:
   }
 
   /// Buffer updates
+  /// 针对写操作，会将几个关键参数放入事务的 buffer_updates 中
   void write(
     const hobject_t &hoid,         ///< [in] object to write
     uint64_t off,                  ///< [in] off at which to write
     uint64_t len,                  ///< [in] len to write from bl
-    ceph::buffer::list &bl,                ///< [in] bl to write will be claimed to len
+    ceph::buffer::list &bl,        ///< [in] bl to write will be claimed to len
     uint32_t fadvise_flags = 0     ///< [in] fadvise hint
     ) {
     auto &op = get_object_op_for_modify(hoid);

@@ -30,8 +30,8 @@ extern pid_t ceph_gettid();
 
 class Thread {
  private:
-  pthread_t thread_id;
-  pid_t pid;
+  pthread_t thread_id;	// 线程 ID
+  pid_t pid;		// 进程 ID
   int cpuid;
   std::string thread_name;
 

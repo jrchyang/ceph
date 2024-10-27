@@ -46,8 +46,8 @@ private:
   utime_t mtime;
   int32_t retry_attempt = -1;   // 0 is first attempt.  -1 if we don't know.
 
-  hobject_t hobj;
-  spg_t pgid;
+  hobject_t hobj;	// 操作的对象
+  spg_t pgid;		// 对象所在的 PG 的 id
   ceph::buffer::list::const_iterator p;
   // Decoding flags. Decoding is only needed for messages caught by pipe reader.
   // Transition from true -> false without locks being held
@@ -56,14 +56,15 @@ private:
   std::atomic<bool> final_decode_needed;
   //
 public:
-  V ops;
+  V ops;	// 针对 oid 的多个操作集合
 private:
-  snapid_t snap_seq;
-  std::vector<snapid_t> snaps;
-
-  uint64_t features;
-  bool bdata_encode;
-  osd_reqid_t reqid; // reqid explicitly set by sender
+  // 快照相关
+  snapid_t snap_seq;		// 如果是 head 对象，就是最新的快照序号
+				// 如果是 snap 对象，就是 snap 对应的 seq
+  std::vector<snapid_t> snaps;	// 所有的 snap 列表
+  uint64_t features;		// 一些 feature 的标志
+  bool bdata_encode;		// 
+  osd_reqid_t reqid;		// 请求的唯一 id 标识 - reqid explicitly set by sender
 
 public:
   friend MOSDOpReply;
