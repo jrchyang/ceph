@@ -3897,6 +3897,8 @@ bool OSDMonitor::preprocess_alive(MonOpRequestRef op)
     goto ignore;
   }
 
+  // 如果最新的 osdmap 中该 osd 的 up_thru 大于等于 osd 想要申请的，
+  // 那么 monitor 不需要决议了，只需要把 osd 中确实的所有 osdmap 发送给它
   if (osdmap.get_up_thru(from) >= m->want) {
     // yup.
     dout(7) << "preprocess_alive want up_thru " << m->want << " dup from " << m->get_orig_source_inst() << dendl;

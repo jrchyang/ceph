@@ -263,6 +263,7 @@ public:
     obc_map[obc->obs.oi.soid] = obc;
   }
   /// Sets up state for new object
+  /// 创建新对象
   void create(
     const hobject_t &hoid
     ) {
@@ -272,6 +273,7 @@ public:
   }
 
   /// Sets up state for target cloned from source
+  /// 克隆对象
   void clone(
     const hobject_t &target,       ///< [in] obj to clone to
     const hobject_t &source        ///< [in] obj to clone from
@@ -282,6 +284,12 @@ public:
   }
 
   /// Sets up state for target renamed from source
+  /// 对原始对象进行重命名
+  /// 注意：原始对象必须是一个临时对象
+  /// rename 操作的典型应用如：针对对象执行修复时，如果通过一次传输（Pull/Push）不能完成，
+  /// 则此时需要借助一个临时对象来进行中转，而不能直接针对原始对象操作，否则存在原始对象
+  /// 写坏的风险。当全部数据传输完成之后，最终通过将原始对象删除，同时将临时对象重命名为
+  /// 原始对象来彻底完成修复
   void rename(
     const hobject_t &target,       ///< [in] to, must not exist, be non-temp
     const hobject_t &source        ///< [in] source (must be a temp object)
@@ -303,6 +311,7 @@ public:
   }
 
   /// Remove -- must not be called on rename target
+  /// 删除对象
   void remove(
     const hobject_t &hoid          ///< [in] obj to remove
     ) {
@@ -332,6 +341,7 @@ public:
   }
 
   /// Clears, truncates
+  /// 删除对象所有 omap 条目
   void omap_clear(
     const hobject_t &hoid          ///< [in] object to clear omap
     ) {
@@ -340,6 +350,7 @@ public:
     op.omap_updates.clear();
     op.omap_header = std::nullopt;
   }
+  // 截断对象（也支持 truncate-up 操作，效果等同于 append，但是使用全 0 填充
   void truncate(
     const hobject_t &hoid,         ///< [in] object
     uint64_t off                   ///< [in] offset to truncate to
@@ -357,6 +368,7 @@ public:
   }
 
   /// Attr ops
+  /// 批量设置属性
   void setattrs(
     const hobject_t &hoid,         ///< [in] object to write
     std::map<std::string, ceph::buffer::list, std::less<>> &attrs ///< [in] attrs, may be cleared
@@ -368,6 +380,7 @@ public:
       d->rebuild();
     }
   }
+  // 设置单个属性
   void setattr(
     const hobject_t &hoid,         ///< [in] object to write
     const std::string &attrname,        ///< [in] attr to write
@@ -378,6 +391,7 @@ public:
     d = bl;
     d->rebuild();
   }
+  // 删除单个属性
   void rmattr(
     const hobject_t &hoid,         ///< [in] object to write
     const std::string &attrname         ///< [in] attr to remove
@@ -387,6 +401,7 @@ public:
   }
 
   /// set alloc hint
+  /// 可设置的属性包括：alloc_hint_flags, expected_object_size, expected_write_size
   void set_alloc_hint(
     const hobject_t &hoid,         ///< [in] object (must exist)
     uint64_t expected_object_size, ///< [in]
@@ -416,6 +431,7 @@ public:
       len,
       ObjectOperation::BufferUpdate::Write{bl, fadvise_flags});
   }
+  // 在指定对象内执行范围克隆
   void clone_range(
     const hobject_t &from,         ///< [in] from
     const hobject_t &to,           ///< [in] to
@@ -430,6 +446,7 @@ public:
       len,
       ObjectOperation::BufferUpdate::CloneRange{from, fromoff, len});
   }
+  // 擦除对象指定范围内的数据，使用全 0 填充
   void zero(
     const hobject_t &hoid,         ///< [in] object
     uint64_t off,                  ///< [in] offset to start zeroing at
@@ -444,6 +461,7 @@ public:
   }
 
   /// Omap updates
+  /// 批量添加 omap 条目
   void omap_setkeys(
     const hobject_t &hoid,         ///< [in] object to write
     ceph::buffer::list &keys_bl            ///< [in] encoded map<string, ceph::buffer::list>
@@ -463,6 +481,7 @@ public:
     encode(keys, bl);
     omap_setkeys(hoid, bl);
   }
+  // 批量删除 omap 条目
   void omap_rmkeys(
     const hobject_t &hoid,         ///< [in] object to write
     ceph::buffer::list &keys_bl            ///< [in] encode set<string>
@@ -502,6 +521,7 @@ public:
     ::encode(key_end, bl);
     omap_rmkeyrange(hoid, bl);
   }
+  // 设置 omap header
   void omap_setheader(
     const hobject_t &hoid,         ///< [in] object to write
     ceph::buffer::list &header             ///< [in] header
@@ -523,7 +543,7 @@ public:
     }
     return ret;
   }
-
+  // 空操作，例如用于强制对象内的数据存盘
   void nop(
     const hobject_t &hoid ///< [in] obj to which we are doing nothing
     ) {

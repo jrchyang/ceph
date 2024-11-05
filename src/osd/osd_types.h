@@ -1008,30 +1008,59 @@ WRITE_CLASS_ENCODER_FEATURES(objectstore_perf_stat_t)
  * pg states
  */
 #define PG_STATE_CREATING           (1ULL << 0)  // creating
+						 // pg 正在被创建
 #define PG_STATE_ACTIVE             (1ULL << 1)  // i am active.  (primary: replicas too)
+						 // PG 可以正常处理来自客户端的读写请求
 #define PG_STATE_CLEAN              (1ULL << 2)  // peers are complete, clean of stray replicas.
+						 // pg 当前不存在待修复的对象，Acting Set 和 Up Set 内容一致，并且大小等于存储池副本数
 #define PG_STATE_DOWN               (1ULL << 4)  // a needed replica is down, PG offline
+						 // peering 过程中，pg 检测到某个不能被跳过的 interval 中（例如该 interval 期间，pg 完成
+						 // peering，并且成功切换至 active 状态，从而有可能正常处理了来自客户端的读写请求），当前
+						 // 剩余在线的 OSD 不足以完成数据修复
 #define PG_STATE_RECOVERY_UNFOUND   (1ULL << 5)  // recovery stopped due to unfound
 #define PG_STATE_BACKFILL_UNFOUND   (1ULL << 6)  // backfill stopped due to unfound
 #define PG_STATE_PREMERGE           (1ULL << 7)  // i am prepare to merging
 #define PG_STATE_SCRUBBING          (1ULL << 8)  // scrubbing
+						 // pg 正在或者即将进行对象一致性扫描，scrubbing 仅扫描对象的元数据
 //#define PG_STATE_SCRUBQ           (1ULL << 9)  // queued for scrub
 #define PG_STATE_DEGRADED           (1ULL << 10) // pg contains objects with reduced redundancy
+						 // peering 完成后，pg 检测到任意一个 pg 实例存在不一致（需要被同步/修复）的对象
+						 // 或者当前 Acting Set 小于存储池副本数
 #define PG_STATE_INCONSISTENT       (1ULL << 11) // pg replicas are inconsistent (but shouldn't be)
+						 // pg 通过 scrub 检测到某个或者某些对象在 pg 实例间出现了不一致（主要是静默数据错误导致）
 #define PG_STATE_PEERING            (1ULL << 12) // pg is (re)peering
+						 // pg 正在进行 peering
 #define PG_STATE_REPAIR             (1ULL << 13) // pg should repair on next scrub
+						 // pg 在下一次执行 scrub 的过程中，如果发现存在不一致的对象，并且能够修复，则自动进行修复
 #define PG_STATE_RECOVERING         (1ULL << 14) // pg is recovering/migrating objects
+						 // recovery 资源预留成功，pg 正在后台根据 peering 的结果针对不一致的对象进行同步/修复
 #define PG_STATE_BACKFILL_WAIT      (1ULL << 15) // [active] reserving backfill
+						 // 等待 backfill 资源预留
 #define PG_STATE_INCOMPLETE         (1ULL << 16) // incomplete content, peering failed.
+						 // peering 过程中，由于
+						 //  1) 无法选出权威日志
+						 //  2) 通过 choose_acting 选出的 acting set 后续不足以完成数据修复
+						 //     （例如针对纠删码，存活的副本数小于 k 值）（注意：与 Down 的区别
+						 //     在于这里选不出来的原因是由于某些副本的日志不完整）等导致 peering 无法正常完成
 #define PG_STATE_STALE              (1ULL << 17) // our state for this pg is stale, unknown.
+						 // monitor 检测到当前 primary 所在的 osd 宕掉；
+						 // 或者 primary 超时未向 monitor 上报 pg 相关的统计信息（例如出现临时性的网络拥塞）
 #define PG_STATE_REMAPPED           (1ULL << 18) // pg is explicitly remapped to different OSDs than CRUSH
+						 // peering 完成，pg 当前 acting set 与 up set 不一致
 #define PG_STATE_DEEP_SCRUB         (1ULL << 19) // deep scrub: check CRC32 on files
+						 // pg 正在或者即将进行对象一致性扫描，同时扫描对象元数据和用户数据
 #define PG_STATE_BACKFILLING        (1ULL << 20) // [active] backfilling pg content
+						 // pg 正在执行 backfill，其总是在 recovery 完成之后进行的
 #define PG_STATE_BACKFILL_TOOFULL   (1ULL << 21) // backfill can't proceed: too full
+						 // 某个需要被 backfill 的 pg 实例，其所在的 osd 可用空间不足，backfill 流程当前被挂起
 #define PG_STATE_RECOVERY_WAIT      (1ULL << 22) // waiting for recovery reservations
+						 // 等待 recovery 资源预留
 #define PG_STATE_UNDERSIZED         (1ULL << 23) // pg acting < pool size
+						 // pg 当前 acting set 小于存储时副本数
 #define PG_STATE_ACTIVATING         (1ULL << 24) // pg is peered but not yet active
+						 // peering 已经完成，pg 正在等待所有 pg 实例同步固化 peering 的结果
 #define PG_STATE_PEERED             (1ULL << 25) // peered, cannot go active, can recover
+						 // peering 已经完成，但是 pg 当前 acting set 规模小于存储池规定的最小副本数
 #define PG_STATE_SNAPTRIM           (1ULL << 26) // trimming snaps
 #define PG_STATE_SNAPTRIM_WAIT      (1ULL << 27) // queued to trim snaps
 #define PG_STATE_RECOVERY_TOOFULL   (1ULL << 28) // recovery can't proceed: too full
@@ -1226,9 +1255,9 @@ struct pg_pool_t {
   static const char *APPLICATION_NAME_RGW;
 
   enum {
-    TYPE_REPLICATED = 1,     // replication
+    TYPE_REPLICATED = 1,     // 副本 - replication
     // TYPE_RAID4 = 2,       // raid4 (never implemented)
-    TYPE_ERASURE = 3,        // erasure-coded
+    TYPE_ERASURE = 3,        // 纠删码 - erasure-coded
   };
   static constexpr uint32_t pg_CRUSH_ITEM_NONE = 0x7fffffff; /* can't import crush.h here */
   static std::string_view get_type_name(int t) {
@@ -1445,7 +1474,7 @@ struct pg_pool_t {
   pg_autoscale_mode_t pg_autoscale_mode = pg_autoscale_mode_t::UNKNOWN;
 
 private:
-  // pg 的数量
+  // pg、pgp 的数量
   __u32 pg_num = 0, pgp_num = 0;  ///< number of pgs
   __u32 pg_num_pending = 0;       ///< pg_num we are about to merge down to
   __u32 pg_num_target = 0;        ///< pg_num we should converge toward
@@ -1480,7 +1509,9 @@ public:
   epoch_t snap_epoch = 0;       ///< osdmap epoch of last snap
   uint64_t auid = 0;            ///< who owns the pg
 
+  // pool 最大的存储字节数
   uint64_t quota_max_bytes = 0; ///< maximum number of bytes for this pool
+  // pool 最大的 object 个数
   uint64_t quota_max_objects = 0; ///< maximum number of objects for this pool
 
   /*
@@ -3004,6 +3035,7 @@ inline std::ostream& operator<<(std::ostream& out, const pg_history_t& h) {
  *    otherwise, we have no idea what the pg is supposed to contain.
  */
 struct pg_info_t {
+  // 保存当前 pg 的 pgid
   spg_t pgid;
   eversion_t last_update;      ///< last object version applied to store.
   eversion_t last_complete;    ///< last version pg was complete through.

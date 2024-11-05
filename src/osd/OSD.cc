@@ -6991,8 +6991,11 @@ void OSD::_collect_metadata(map<string,string> *pm)
 void OSD::queue_want_up_thru(epoch_t want)
 {
   std::shared_lock map_locker{map_lock};
+  // 获取当前 osdmap 中该 osd 对应的 osdmap 版本
   epoch_t cur = get_osdmap()->get_up_thru(whoami);
   std::lock_guard report_locker(mon_report_lock);
+  // 如果所有 pg 中最大的 info.history.same_interval_since 大于当前的，
+  // 说明该 osd 需要申请 up_thru
   if (want > up_thru_wanted) {
     dout(10) << "queue_want_up_thru now " << want << " (was " << up_thru_wanted << ")"
 	     << ", currently " << cur
@@ -7006,6 +7009,7 @@ void OSD::queue_want_up_thru(epoch_t want)
   }
 }
 
+// 向 mon 发送更新 up_thru 的消息
 void OSD::send_alive()
 {
   ceph_assert(ceph_mutex_is_locked(mon_report_lock));
@@ -9245,6 +9249,7 @@ bool OSD::require_same_or_newer_map(OpRequestRef& op, epoch_t epoch,
   ceph_assert(ceph_mutex_is_locked(osd_lock));
 
   // do they have a newer map?
+  // 加入等待队列
   if (epoch > osdmap->get_epoch()) {
     dout(7) << "waiting for newer map epoch " << epoch
 	    << " > my " << osdmap->get_epoch() << " with " << m << dendl;
@@ -9339,10 +9344,12 @@ void OSD::handle_pg_create(OpRequestRef op)
 
   dout(10) << "handle_pg_create " << *m << dendl;
 
+  // 检查 op 是否来自 mon
   if (!require_mon_peer(op->get_req())) {
     return;
   }
 
+  // pg 携带的 epoch 是否更新
   if (!require_same_or_newer_map(op, m->epoch, false))
     return;
 
@@ -9359,6 +9366,7 @@ void OSD::handle_pg_create(OpRequestRef op)
       continue;
     pg_t on = p->first;
 
+    // 关联的 pool 是否存在
     if (!osdmap->have_pg_pool(on.pool())) {
       dout(20) << "ignoring pg on deleted pool " << on << dendl;
       continue;
@@ -9377,6 +9385,7 @@ void OSD::handle_pg_create(OpRequestRef op)
     osdmap->pg_to_up_acting_osds(on, &up, &up_primary, &acting, &acting_primary);
     int role = osdmap->calc_pg_role(pg_shard_t(whoami, pgid.shard), acting);
 
+    // 检查 primary 是否发生了变化
     if (acting_primary != whoami) {
       dout(10) << "mkpg " << on << "  not acting_primary (" << acting_primary
 	       << "), my role=" << role << ", skipping" << dendl;
@@ -9398,6 +9407,8 @@ void OSD::handle_pg_create(OpRequestRef op)
 	       << dendl;
       continue;
     }
+
+    // 进入 peering 流程
     enqueue_peering_evt(
       pgid,
       PGPeeringEventRef(

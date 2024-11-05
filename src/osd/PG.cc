@@ -2275,11 +2275,14 @@ ostream& operator<<(ostream& out, const PG& pg)
 bool PG::can_discard_op(OpRequestRef& op)
 {
   auto m = op->get_req<MOSDOp>();
+  // op 所属的客户端链路已断开
   if (cct->_conf->osd_discard_disconnected_ops && OSD::op_is_discardable(m)) {
     dout(20) << " discard " << *m << dendl;
     return true;
   }
 
+  // 收到 op 时，PG 当前已经切换到一个更新的 Interval
+  // 即 PG 此时的 same_interval_since 比 op 携带的 epoch 要大，后续客户端会进行重发
   if (m->get_map_epoch() < info.history.same_primary_since) {
     dout(7) << " changed after " << m->get_map_epoch()
 	    << ", dropping " << *m << dendl;
@@ -2298,7 +2301,7 @@ bool PG::can_discard_op(OpRequestRef& op)
     return true;
   }
 
-
+  // op 在 PG 分裂之前发送，后续客户端会进行重发
   if (m->get_connection()->has_feature(CEPH_FEATURE_RESEND_ON_SPLIT)) {
     // >= luminous client
     if (m->get_connection()->has_feature(CEPH_FEATURE_SERVER_NAUTILUS)) {

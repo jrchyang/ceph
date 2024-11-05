@@ -456,6 +456,7 @@ public:
     }
   };
 
+  // 集群 osdmap 发生变化，osd 本身完成 osdmap 同步后，同步推送至所有 pg
   struct AdvMap : boost::statechart::event< AdvMap > {
     OSDMapRef osdmap;
     OSDMapRef lastmap;
@@ -475,12 +476,14 @@ public:
     }
   };
 
+  // osdmap 同步完成，pg 可以开始 peering
   struct ActMap : boost::statechart::event< ActMap > {
     ActMap() : boost::statechart::event< ActMap >() {}
     void print(std::ostream *out) const {
       *out << "ActMap";
     }
   };
+  // peering 即将完成
   struct Activate : boost::statechart::event< Activate > {
     epoch_t activation_epoch;
     explicit Activate(epoch_t q) : boost::statechart::event< Activate >(),
@@ -525,15 +528,22 @@ public:
     }
   };
 
+  // 创建 pg
   TrivialEvent(Initialize)
+  // peering 过程中，primary 成功收到所有请求的 info
   TrivialEvent(GotInfo)
+  // 等待当前 osd 完成 up_thru 更新
   TrivialEvent(NeedUpThru)
+  // backfill 完成
   TrivialEvent(Backfilled)
+  // backfill 过程中，primary 本地预留资源成功
   TrivialEvent(LocalBackfillReserved)
   TrivialEvent(RejectTooFullRemoteReservation)
+  // primary 检测到需要执行 backfill
   TrivialEvent(RequestBackfill)
   TrivialEvent(RemoteRecoveryPreempted)
   TrivialEvent(RemoteBackfillPreempted)
+  // 某个待执行 backfill 的 pg 实例所在的 osd 空间不足
   TrivialEvent(BackfillTooFull)
   TrivialEvent(RecoveryTooFull)
 
@@ -542,14 +552,18 @@ public:
   TrivialEvent(NeedActingChange)
   TrivialEvent(IsIncomplete)
   TrivialEvent(IsDown)
-
+  // recovery 完成，并且后续无需执行 backfill
   TrivialEvent(AllReplicasRecovered)
+  // primary 开始进行 recovery 资源预留
   TrivialEvent(DoRecovery)
+  // recovery 过程中，primary 本地预留资源成功
   TrivialEvent(LocalRecoveryReserved)
   TrivialEvent(AllRemotesReserved)
+  // 所有需要参与 backfill 的 pg 实例完成资源预留
   TrivialEvent(AllBackfillsReserved)
+  // pg 不存在待修复的对象，也不存在需要执行 backfill 的 pg 实例
   TrivialEvent(GoClean)
-
+  // peering 成功完成
   TrivialEvent(AllReplicasActivated)
 
   TrivialEvent(IntervalFlush)
@@ -1150,6 +1164,7 @@ public:
     void exit();
   };
 
+  // 所有参与 recovery 的 pg 实例完成资源预留
   struct Recovering : boost::statechart::state< Recovering, Active >, NamedState {
     typedef boost::mpl::list <
       boost::statechart::custom_reaction< AllReplicasRecovered >,

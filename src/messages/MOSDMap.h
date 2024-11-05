@@ -20,6 +20,7 @@
 #include "osd/OSDMap.h"
 #include "include/ceph_features.h"
 
+// 该消息用来获取 osdmap 消息
 class MOSDMap final : public Message {
 private:
   static constexpr int HEAD_VERSION = 4;

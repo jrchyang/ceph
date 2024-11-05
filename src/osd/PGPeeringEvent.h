@@ -69,6 +69,7 @@ public:
 typedef std::shared_ptr<PGPeeringEvent> PGPeeringEventRef;
 typedef std::unique_ptr<PGPeeringEvent> PGPeeringEventURef;
 
+// pg 收到 info
 struct MInfoRec : boost::statechart::event< MInfoRec > {
   pg_shard_t from;
   pg_info_t info;
@@ -91,6 +92,7 @@ struct MInfoRec : boost::statechart::event< MInfoRec > {
   }
 };
 
+// pg 收到 log
 struct MLogRec : boost::statechart::event< MLogRec > {
   pg_shard_t from;
   boost::intrusive_ptr<MOSDPGLog> msg;
@@ -98,6 +100,7 @@ struct MLogRec : boost::statechart::event< MLogRec > {
   void print(std::ostream *out) const;
 };
 
+// pg 收到 notify
 struct MNotifyRec : boost::statechart::event< MNotifyRec > {
   spg_t pgid;
   pg_shard_t from;
@@ -192,12 +195,17 @@ struct RequestRecoveryPrio : boost::statechart::event< RequestRecoveryPrio > {
     }								   \
   };
 
+// 空事件，典型如 osd 收到 osdmap 更新通知时，通过本事件将所有 pg 加入内部 peering_wq
+// 逐个检测是否需要重新开始 peering
 TrivialEvent(NullEvt)
+// backfill 过程中，收到指定 pg 实例资源预留成功响应
 TrivialEvent(RemoteBackfillReserved)
+// backfill 过程中，收到指定 pg 实例资源预留失败响应（osd 可用空间不足）
 TrivialEvent(RemoteReservationRejectedTooFull)
 TrivialEvent(RemoteReservationRevokedTooFull)
 TrivialEvent(RemoteReservationRevoked)
 TrivialEvent(RemoteReservationCanceled)
+// recovery 过程中，收到指定 pg 实例资源预留成功响应
 TrivialEvent(RemoteRecoveryReserved)
 TrivialEvent(RecoveryDone)
 

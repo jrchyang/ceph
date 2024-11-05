@@ -1328,6 +1328,19 @@ PastIntervals::PriorSet PeeringState::build_prior()
     state_set(PG_STATE_DOWN);
   }
 
+
+  /**
+   * 这里需要引入一个概念 - past_interval
+   *
+   * past_interval 是 osdmap 版本号 epoch 的一个序列。在该序列内一个 pg 的
+   * acting set 和 up set 不会发生变化。
+   *
+   * 如果 osd.1 挂了，那么 pg 的 up set 肯定发生变化了，也即产生了一个新的 past_interval，
+   * 那么此时会更新 info.history.same_interval_since 为新的 osdmap 的版本号，
+   * 因为 same_interval_since 表示的是最近一个 past_interval 的第一个 osdmap 的版本号
+   *
+   * 所以如果 osd.1 挂了后，此时这个条件肯定满足
+   */
   if (get_osdmap()->get_up_thru(pg_whoami.osd) <
       info.history.same_interval_since) {
     psdout(10) << "up_thru " << get_osdmap()->get_up_thru(pg_whoami.osd)

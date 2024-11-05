@@ -1874,6 +1874,7 @@ void PrimaryLogPG::do_request(
   // 如果 pg 还没有 peered
   if (!is_peered()) {
     // Delay unless PGBackend says it's ok
+    // 是否可以由后端直接处理
     if (pgbackend->can_handle_while_inactive(op)) {
       bool handled = pgbackend->handle_message(op);
       ceph_assert(handled);
@@ -2028,6 +2029,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     }
   }
 
+  // 指示 op 之间可以并发执行
   if (m->has_flag(CEPH_OSD_FLAG_PARALLELEXEC)) {
     // not implemented.
     dout(20) << __func__ << ": PARALLELEXEC not implemented " << *m << dendl;
@@ -2035,6 +2037,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     return;
   }
 
+  // 按照 op 携带的操作类型（单个 op 可以包含多个操作）初始化 op 中的各种标志位
   {
     int r = op->maybe_init_op_info(*get_osdmap());
     if (r) {
@@ -2043,6 +2046,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     }
   }
 
+  // 指示 op 可以被 Primary/Replica 执行，但是当前处理 op 的 PG 既不是 Primary 也不是 Replica（例如 Stray）
   if ((m->get_flags() & (CEPH_OSD_FLAG_BALANCE_READS |
 			 CEPH_OSD_FLAG_LOCALIZE_READS)) &&
       op->may_read() &&
@@ -2127,6 +2131,8 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   // bypass all full checks anyway.  If this op isn't write or
   // read-ordered, we skip.
   // FIXME: we exclude mds writes for now.
+  // op 在集群被标记为 Full 之前发送（PG 通过比对 op 携带的 epoch 和集群标记为
+  // Full 时的 Epoch 感知）并且没有携带 CEPH_OSD_FLAG_FULL_FORCE 标志
   if (write_ordered && !(m->get_source().is_mds() ||
 			 m->has_flag(CEPH_OSD_FLAG_FULL_TRY) ||
 			 m->has_flag(CEPH_OSD_FLAG_FULL_FORCE)) &&
@@ -2138,6 +2144,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   // mds should have stopped writing before this point.
   // We can't allow OSD to become non-startable even if mds
   // could be writing as part of file removals.
+  // pg 所在的 OSD 可用存储空间不足
   if (write_ordered && osd->check_failsafe_full(get_dpp()) &&
       !m->has_flag(CEPH_OSD_FLAG_FULL_TRY)) {
     dout(10) << __func__ << " fail-safe full check failed, dropping request." << dendl;
@@ -2158,9 +2165,12 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     }
     return;
   }
+
+  // op 包含写操作
   if (op->may_write()) {
 
     // invalid?
+    // 企图访问快照对象
     if (m->get_snapid() != CEPH_NOSNAP) {
       dout(20) << __func__ << ": write to clone not valid " << *m << dendl;
       osd->reply_op_error(op, -EINVAL);
@@ -2168,6 +2178,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     }
 
     // too big?
+    // 一次写入的数据量过大
     if (cct->_conf->osd_max_write_size &&
         m->get_data_len() > cct->_conf->osd_max_write_size << 20) {
       // journal can't hold commit!
@@ -2190,6 +2201,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   [[maybe_unused]] auto span = tracing::osd::tracer.add_span(__func__, op->osd_parent_span);
 
   // missing object?
+  // 对象是否可读
   if (is_unreadable_object(head)) {
     if (!is_primary()) {
       osd->reply_op_error(op, -EAGAIN);
@@ -2259,6 +2271,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     version_t user_version;
     int return_code = 0;
     vector<pg_log_op_return_item_t> op_returns;
+    // 检查 op 是否为重发
     bool got = check_in_progress_op(
       m->get_reqid(), &version, &user_version, &return_code, &op_returns);
     if (got) {
@@ -5440,13 +5453,13 @@ void PrimaryLogPG::maybe_create_new_object(
   bool ignore_transaction)
 {
   ObjectState& obs = ctx->new_obs;
-  if (!obs.exists) {
+  if (!obs.exists) { // 对象不存在
     ctx->delta_stats.num_objects++;
-    obs.exists = true;
+    obs.exists = true; // 设置属性
     ceph_assert(!obs.oi.is_whiteout());
     obs.oi.new_object();
     if (!ignore_transaction)
-      ctx->op_t->create(obs.oi.soid);
+      ctx->op_t->create(obs.oi.soid); // 生成 create 事务
   } else if (obs.oi.is_whiteout()) {
     dout(10) << __func__ << " clearing whiteout on " << obs.oi.soid << dendl;
     ctx->new_obs.oi.clear_flag(object_info_t::FLAG_WHITEOUT);
@@ -6702,7 +6715,9 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       result = 0;
       { // write
         __u32 seq = oi.truncate_seq;
-	tracepoint(osd, do_osd_op_pre_write, soid.oid.name.c_str(), soid.snap.val, oi.size, seq, op.extent.offset, op.extent.length, op.extent.truncate_size, op.extent.truncate_seq);
+	tracepoint(osd, do_osd_op_pre_write, soid.oid.name.c_str(), 
+		   soid.snap.val, oi.size, seq, op.extent.offset, 
+		   op.extent.length, op.extent.truncate_size, op.extent.truncate_seq);
 	if (op.extent.length != osd_op.indata.length()) {
 	  result = -EINVAL;
 	  break;
@@ -6711,6 +6726,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (pool.info.has_flag(pg_pool_t::FLAG_WRITE_FADVISE_DONTNEED))
 	  op.flags = op.flags | CEPH_OSD_OP_FLAG_FADVISE_DONTNEED;
 
+	// 纠删码相关的对其校验
 	if (pool.info.requires_aligned_append() &&
 	    (op.extent.offset % pool.info.required_alignment() != 0)) {
 	  result = -EOPNOTSUPP;
@@ -6728,6 +6744,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  break;
 	}
 
+	// truncate_seq 是否有效
         if (seq && (seq > op.extent.truncate_seq) &&
             (op.extent.offset + op.extent.length > oi.size)) {
 	  // old write, arrived after trimtrunc
@@ -6766,6 +6783,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    oi.truncate_size = op.extent.truncate_size;
 	  }
 	}
+	// offset 及 length 合法性校验
 	result = check_offset_and_length(
 	  op.extent.offset, op.extent.length,
 	  static_cast<Option::size_t>(osd->osd_max_object_size), get_dpp());
@@ -6775,31 +6793,40 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	maybe_create_new_object(ctx);
 
 	if (op.extent.length == 0) {
+	  // offset 大于对象大小
 	  if (op.extent.offset > oi.size) {
+	    // 生成 truncate 事务
 	    t->truncate(
 	      soid, op.extent.offset);
             truncate_update_size_and_usage(ctx->delta_stats, oi,
                                            op.extent.offset);
 	  } else {
+	    // 生成 nop 事务
 	    t->nop(soid);
 	  }
 	} else {
+	  // 生成 write 事务
 	  t->write(
 	    soid, op.extent.offset, op.extent.length, osd_op.indata, op.flags);
 	}
 
+	// 满对象写
 	if (op.extent.offset == 0 && op.extent.length >= oi.size
             && !skip_data_digest) {
+	  // 计算并更新数据校验和
 	  obs.oi.set_data_digest(osd_op.indata.crc32c(-1));
-	} else if (op.extent.offset == oi.size && obs.oi.is_data_digest()) {
+	} else if (op.extent.offset == oi.size && obs.oi.is_data_digest()) { // 追加写
           if (skip_data_digest) {
+	    // 消除数据校验和
             obs.oi.clear_data_digest();
           } else {
+	    // 计算并更新数据校验和
 	    obs.oi.set_data_digest(osd_op.indata.crc32c(obs.oi.data_digest));
           }
 	} else {
-	  obs.oi.clear_data_digest();
+	  obs.oi.clear_data_digest(); // 消除数据校验和
         }
+	// 更新对象 modified_ranges
 	write_update_size_and_usage(ctx->delta_stats, oi, ctx->modified_ranges,
 				    op.extent.offset, op.extent.length);
 	ctx->clean_regions.mark_data_region_dirty(op.extent.offset, op.extent.length);
@@ -8547,6 +8574,7 @@ void PrimaryLogPG::_make_clone(
 void PrimaryLogPG::make_writeable(OpContext *ctx)
 {
   const hobject_t& soid = ctx->obs->oi.soid;
+  // 获取最新快照上下文
   SnapContext& snapc = ctx->snapc;
 
   // clone?
@@ -8901,6 +8929,7 @@ int PrimaryLogPG::prepare_transaction(OpContext *ctx)
   }
 
   // prepare the actual mutation
+  // 生成原始 op 对应的 pg 事务
   int result = do_osd_ops(ctx, *ctx->ops);
   if (result < 0) {
     if (ctx->op->may_write() &&
@@ -8945,9 +8974,11 @@ int PrimaryLogPG::prepare_transaction(OpContext *ctx)
 
   const hobject_t& soid = ctx->obs->oi.soid;
   // clone, if necessary
+  // 针对 head 对象检查是否需要预先执行克隆操作
   if (soid.snap == CEPH_NOSNAP)
     make_writeable(ctx);
 
+  // 检查是否需要创建或者删除 snapdir 对象，生成日志，并更新对象的 OI 和 SS 属性
   finish_ctx(ctx,
 	     ctx->new_obs.exists ? pg_log_entry_t::MODIFY :
 	     pg_log_entry_t::DELETE,

@@ -65,14 +65,26 @@ class health_check_map_t;
  * acked writes.  If the osd comes back to life later, that's fine to,
  * but those writes will still be lost (the divergent objects will be
  * thrown out).
+ *
+ * 用来表述随着时间推移，各个状态的 epoch
+ * 在 osd 处于 alive+healthy 期间，我们通常会跟踪两个 interval，其中最近的一个 interval
+ * 就是 [up_from, up_thru]，这里 up_thru 就是 osd 被确信进入 _started_ 状态时的前一个
+ * epoch 值，换句话说就是 osd 实际进入 death 状态的下边界值，而 down_at 就是 osd
+ * 进入 death 状态的上边界值。另一个则是 last_clean interval [begin, end]，在这种
+ * 情况下，last interval 就是 osd 进入 _finished 状态时的前一个 epoch 值，或者
+ * osd 执行 cleanly shutdown 的这一段区间
  */
 struct osd_info_t {
-  epoch_t last_clean_begin;  // last interval that ended with a clean osd shutdown
-  epoch_t last_clean_end;
-  epoch_t up_from;   // epoch osd marked up
-  epoch_t up_thru;   // lower bound on actual osd death (if > up_from)
-  epoch_t down_at;   // upper bound on actual osd death (if > up_from)
-  epoch_t lost_at;   // last epoch we decided data was "lost"
+  epoch_t last_clean_begin;	// last interval that ended with a clean osd shutdown
+  epoch_t last_clean_end;	// 以一个 clean 的 osd 关闭而结束的最终区间
+  epoch_t up_from;	// epoch osd marked up
+			// OSD 被标记为 up 的 epoch
+  epoch_t up_thru;	// lower bound on actual osd death (if > up_from)
+			// 实际 OSD 终止时的下界（如果它大于 up_from）
+  epoch_t down_at;	// upper bound on actual osd death (if > up_from)
+			// 实际 OSD 终止时的上界（如果它大于 up_from）
+  epoch_t lost_at;	// last epoch we decided data was "lost"
+			// 决定数据已经丢失时的最终 epoch
   
   osd_info_t() : last_clean_begin(0), last_clean_end(0),
 		 up_from(0), up_thru(0), down_at(0), lost_at(0) {}
@@ -86,12 +98,18 @@ WRITE_CLASS_ENCODER(osd_info_t)
 
 std::ostream& operator<<(std::ostream& out, const osd_info_t& info);
 
+// osd 的一些扩展信息
 struct osd_xinfo_t {
   utime_t down_stamp;      ///< timestamp when we were last marked down
+			   ///< OSD 被标记为 down 时的时间戳
   float laggy_probability; ///< encoded as __u32: 0 = definitely not laggy, 0xffffffff definitely laggy
+			   ///< 滞后概率，编码为 __u32，0 表示没有滞后，0xffffffff 表示滞后
   __u32 laggy_interval;    ///< average interval between being marked laggy and recovering
+			   ///< 被标记为滞后和恢复中的平均间隔
   uint64_t features;       ///< features supported by this osd we should know about
+			   ///< 应该知道的 OSD 所支持的特性
   __u32 old_weight;        ///< weight prior to being auto marked out
+			   ///< 自动标记为 out 之前的权重
   utime_t last_purged_snaps_scrub; ///< last scrub of purged_snaps
   epoch_t dead_epoch = 0;  ///< last epoch we were confirmed dead (not just down)
 
@@ -360,18 +378,20 @@ class OSDMap {
 public:
   MEMPOOL_CLASS_HELPERS();
 
+  // osdmap 的增量版本
   class Incremental {
   public:
     MEMPOOL_CLASS_HELPERS();
 
     /// feature bits we were encoded with.  the subsequent OSDMap
     /// encoding should match.
-    uint64_t encode_features;
-    uuid_d fsid;	// 当前集群的 fsid 值
-    epoch_t epoch;	// new epoch; we are a diff from epoch-1 to epoch
-			// 当前集群的 epoch 值
-    utime_t modified;	// 修改的时间戳
-    int64_t new_pool_max; //incremented by the OSDMonitor on each pool create
+    uint64_t encode_features;	// 编码的特征位，随后的 osdmap 编码应该匹配
+    uuid_d fsid;		// 当前集群的 fsid 值
+    epoch_t epoch;		// new epoch; we are a diff from epoch-1 to epoch
+				// 新的 epoch，从 epoch-1 到 epoch 的差异
+    utime_t modified;		// 修改的时间戳
+    int64_t new_pool_max; 	//incremented by the OSDMonitor on each pool create
+				// 当每个 pool 被创建时由 osdmonitor 增加
     int32_t new_flags;
     ceph_release_t new_require_osd_release{0xff};
     uint32_t new_stretch_bucket_count{0};
@@ -382,7 +402,7 @@ public:
     bool change_stretch_mode{false};
 
     // full (rare)
-    ceph::buffer::list fullmap;  // in lieu of below.
+    ceph::buffer::list fullmap;  // in lieu of below. 替代变量 crush
     ceph::buffer::list crush;
 
     // incremental
